@@ -1,0 +1,4 @@
+id: LunarLander-v3
+continuous: true
+gravity: -10.0
+render_mode: rgb_array

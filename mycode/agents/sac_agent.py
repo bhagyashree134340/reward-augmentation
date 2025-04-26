@@ -8,10 +8,12 @@ import numpy as np
 from collections import namedtuple
 import itertools
 
-from network import Critic, Actor
-from replay_buffer import ReplayBuffer
-from utils import polyak_update
+from mycode.networks.network import Critic, Actor
+from mycode.replay_buffer.replay_buffer import ReplayBuffer
+from mycode.utils.polyak import polyak_update
+import logging
 
+log = logging.getLogger(__name__)
 EpisodeStats = namedtuple("Stats", ["episode_lengths", "episode_rewards"])
 
 
@@ -83,9 +85,11 @@ class SACAgent:
         current_timestep = 0
 
         for i_episode in range(num_episodes):
+            # TODO: Also log the average return(?) per 100 eps maybe
+
             # Print out which episode we're on, useful for debugging.
             if (i_episode + 1) % 100 == 0:
-                print(f'Episode {i_episode + 1} of {num_episodes}  Time Step: {current_timestep}')
+                log.info(f'Episode {i_episode + 1} of {num_episodes}  Time Step: {current_timestep}')
 
             # Reset the environment and get initial observation
             obs, _ = self.env.reset()
