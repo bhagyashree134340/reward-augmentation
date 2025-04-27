@@ -1,3 +1,13 @@
 defaults:
   - agent: sac_agent
   - env: lunar_lander
+
+seed: 42
+
+hydra:
+  mode: MULTIRUN
+  sweeper:
+    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+    params:
+      agent.lr: 0.001,0.0005,0.0001
+      agent.batch_size: 32,64,128

@@ -5,6 +5,7 @@ from IPython.display import Image as IImage
 import hydra
 from omegaconf import DictConfig
 
+from utils.misc import set_seed
 from networks.network import Actor
 from agents.sac_agent import SACAgent
 from utils.gif import rendered_rollout, save_rgb_animation
@@ -14,8 +15,9 @@ import logging
 log = logging.getLogger(__name__)
 
 
-@hydra.main(config_path="../conf", config_name="config", version_base=None)
+@hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig):
+    set_seed(cfg.seed)
     op_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
     plots_dir = op_dir / "plots"
     gifs_dir = op_dir / "gifs"
@@ -26,8 +28,9 @@ def main(cfg: DictConfig):
 
     env = gym.make(cfg.env.id, continuous=cfg.env.continuous, gravity=cfg.env.gravity, render_mode=cfg.env.render_mode)
     log.info(f"Training on {env.spec.id}")
-    log.info(f"Observation space: {env.observation_space}")
-    log.info(f"Action space: {env.action_space}\n")
+    # log.info(f"Observation space: {env.observation_space}")
+    # log.info(f"Action space: {env.action_space}\n")
+    log.info(f"gamma+{cfg.agent.discount_factor} | lr={cfg.agent.lr} | batch_size={cfg.agent.batch_size}")
 
     agent = SACAgent(
         env,

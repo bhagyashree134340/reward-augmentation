@@ -8,9 +8,9 @@ import numpy as np
 from collections import namedtuple
 import itertools
 
-from mycode.networks.network import Critic, Actor
-from mycode.replay_buffer.replay_buffer import ReplayBuffer
-from mycode.utils.polyak import polyak_update
+from networks.network import Critic, Actor
+from replay_buffer.replay_buffer import ReplayBuffer
+from utils.polyak import polyak_update
 import logging
 
 log = logging.getLogger(__name__)
@@ -83,14 +83,26 @@ class SACAgent:
             episode_rewards=np.zeros(num_episodes),
         )
         current_timestep = 0
+        # TODO: log rewards every 100 eps then reset the accumulator
+        # to accumulate rewards every 100 eps
+        reward_accumulator = []
 
         for i_episode in range(num_episodes):
             # TODO: Also log the average return(?) per 100 eps maybe
 
+            avg_reward = sum(stats.episode_rewards) / len(stats.episode_rewards)
+            max_reward = max(stats.episode_rewards)
+            min_reward = min(stats.episode_rewards)
+
             # Print out which episode we're on, useful for debugging.
             if (i_episode + 1) % 100 == 0:
-                log.info(f'Episode {i_episode + 1} of {num_episodes}  Time Step: {current_timestep}')
-
+                log.info(
+                    f"Episode {i_episode + 1} of {num_episodes} | "
+                    f"Time Step: {current_timestep} | "
+                    f"Avg Rew: {avg_reward:.2f} | "
+                    f"Max Rew: {max_reward:.2f} | "
+                    f"Min Rew: {min_reward:.2f}"
+                )
             # Reset the environment and get initial observation
             obs, _ = self.env.reset()
 
