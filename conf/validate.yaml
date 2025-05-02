@@ -1,0 +1,4 @@
+validation:
+  frequency: 10        # Validate every N episodes
+  max_steps: 500       # Max rollout steps for validation
+  save_dir: "validation"

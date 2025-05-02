@@ -30,7 +30,7 @@ def main(cfg: DictConfig):
     log.info(f"Training on {env.spec.id}")
     # log.info(f"Observation space: {env.observation_space}")
     # log.info(f"Action space: {env.action_space}\n")
-    log.info(f"gamma+{cfg.agent.discount_factor} | lr={cfg.agent.lr} | batch_size={cfg.agent.batch_size}")
+    log.info(f"gamma={cfg.agent.discount_factor} | lr={cfg.agent.lr} | batch_size={cfg.agent.batch_size}")
 
     agent = SACAgent(
         env,
@@ -42,7 +42,7 @@ def main(cfg: DictConfig):
         target_entropy=cfg.agent.target_entropy
     )
 
-    stats = agent.train(cfg.agent.num_episodes)
+    stats = agent.train(cfg.agent.num_episodes, cfg.agent.max_steps)
 
     # Save and load actor
     actor_path = op_dir / "sac_actor.pt"

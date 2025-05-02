@@ -1,11 +1,9 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
 import copy
 import numpy as np
-from collections import namedtuple
 import itertools
 
 from networks.network import Critic, Actor
@@ -13,8 +11,10 @@ from replay_buffer.replay_buffer import ReplayBuffer
 from utils.polyak import polyak_update
 import logging
 
+from utils.validate import validate
+from utils.stats import EpisodeStats
+
 log = logging.getLogger(__name__)
-EpisodeStats = namedtuple("Stats", ["episode_lengths", "episode_rewards"])
 
 
 class SACAgent:
@@ -70,10 +70,11 @@ class SACAgent:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         self.ent_coef_optimizer = optim.Adam([self.log_ent_coef], lr=lr)
 
-    def train(self, num_episodes: int) -> EpisodeStats:
+    def train(self, num_episodes: int, max_steps: int) -> EpisodeStats:
         """
         Train the SAC agent.
 
+        :param max_steps: max steps to capping episode length
         :param num_episodes: Number of episodes to train.
         :returns: The episode statistics.
         """
@@ -129,152 +130,83 @@ class SACAgent:
                 # Sample a mini batch from the replay buffer
                 obs_batch, act_batch, rew_batch, next_obs_batch, tm_batch = self.buffer.sample(self.batch_size)
 
-                # Update the Critic network
-                self.update_critics(
-                    self.q1, self.q1_target, self.q1_optimizer,
-                    self.q2, self.q2_target, self.q2_optimizer,
-                    self.actor_target, self.log_ent_coef, self.gamma,
-                    obs_batch, act_batch, rew_batch, next_obs_batch, tm_batch
-                )
-
-                # Update the Actor network
-                self.update_actor(
-                    self.q1,
-                    self.q2,
-                    self.actor,
-                    self.actor_optimizer,
-                    obs_batch.float(),
-                    self.log_ent_coef,
-                )
-
-                # Update Entropy Coefficient
-                self.update_entropy_coefficient(
-                    self.actor,
-                    self.log_ent_coef,
-                    self.target_entropy,
-                    self.ent_coef_optimizer,
-                    obs_batch.float(),
-                )
-
-                # Update the target networks via Polyak Update
-                polyak_update(self.q1.parameters(), self.q1_target.parameters(), self.tau)
-                polyak_update(self.q2.parameters(), self.q2_target.parameters(), self.tau)
-                polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
+                # Update for critics, actor, and entropy coefficient
+                self.update(obs_batch, act_batch, rew_batch, next_obs_batch, tm_batch)
 
                 current_timestep += 1
 
                 # Check whether the episode is finished
-                if terminated or truncated or episode_time >= 500:
+                if terminated or truncated or episode_time >= max_steps:
                     break
                 obs = next_obs
+
+            if i_episode % 10 == 0:
+                validate(self.actor, self.env, i_episode, max_steps)
+
         return stats
 
-    def update_critics(
+    def update(
             self,
-            q1: nn.Module,
-            q1_target: nn.Module,
-            q1_optimizer: optim.Optimizer,
-            q2: nn.Module,
-            q2_target: nn.Module,
-            q2_optimizer: optim.Optimizer,
-            actor_target: nn.Module,
-            log_ent_coef: torch.Tensor,
-            gamma: float,
-            obs: torch.Tensor,
-            act: torch.Tensor,
-            rew: torch.Tensor,
-            next_obs: torch.Tensor,
-            tm: torch.Tensor,
+            obs_batch: torch.Tensor,
+            act_batch: torch.Tensor,
+            rew_batch: torch.Tensor,
+            next_obs_batch: torch.Tensor,
+            tm_batch: torch.Tensor,
     ):
         """
-        Update both of SAC's critics for one optimizer step.
+         Update function that updates critics, actor, and entropy coefficient
 
-        :param log_ent_coef:
-        :param q1: The first critic network.
-        :param q1_target: The target first critic network.
-        :param q1_optimizer: The first critic's optimizer.
-        :param q2: The second critic network.
-        :param q2_target: The target second critic network.
-        :param q2_optimizer: The second critic's optimizer.
-        :param actor: The actor network.
-        :param actor_target: The target actor network.
-        :param actor_optimizer: The actor's optimizer.
-        :param gamma: The discount factor.
-        :param obs: Batch of current observations.
-        :param act: Batch of actions.
-        :param rew: Batch of rewards.
-        :param next_obs: Batch of next observations.
-        :param tm: Batch of termination flags.
-
+        :param obs_batch: Batch of current observations.
+        :param act_batch: Batch of actions.
+        :param rew_batch: Batch of rewards.
+        :param next_obs_batch: Batch of next observations.
+        :param tm_batch: Batch of termination flags.
         """
-        # 1. Calculate the target
+        # Compute target for critics
         with torch.no_grad():
-            next_action, next_action_log_prob = actor_target(next_obs)
-            q1_target_value = q1_target(next_obs, next_action)
-            q2_target_value = q2_target(next_obs, next_action)
+            next_action, next_action_log_prob = self.actor_target(next_obs_batch)
+            q1_target_value = self.q1_target(next_obs_batch, next_action)
+            q2_target_value = self.q2_target(next_obs_batch, next_action)
             q_target_min = torch.min(q1_target_value, q2_target_value)
 
-            q_target = rew.unsqueeze(-1) + gamma * (1 - tm.unsqueeze(-1).float()) * (
-                    q_target_min - log_ent_coef.exp() * next_action_log_prob.sum(dim=-1, keepdim=True)).mean(dim=-1,
-                                                                                                             keepdim=True)
+            # Compute target Q-value with entropy term
+            q_target = rew_batch.unsqueeze(-1) + self.gamma * (1 - tm_batch.unsqueeze(-1).float()) * (
+                    q_target_min - self.log_ent_coef.exp() * next_action_log_prob.sum(dim=-1, keepdim=True)
+            ).mean(dim=-1, keepdim=True)
 
-        # 2. Update both q function using our target
-        for q, optimizer in [(q1, q1_optimizer), (q2, q2_optimizer)]:
-            q_pred = q(obs, act)
+        # Update both q function using our target
+        for q, optimizer in [(self.q1, self.q1_optimizer), (self.q2, self.q2_optimizer)]:
+            q_pred = q(obs_batch, act_batch)
             q_loss = F.mse_loss(q_pred, q_target)
 
             optimizer.zero_grad()
             q_loss.backward()
             optimizer.step()
 
-    def update_actor(
-            self,
-            q1: nn.Module,
-            q2: nn.Module,
-            actor: nn.Module,
-            actor_optimizer: optim.Optimizer,
-            obs: torch.Tensor,
-            log_ent_coef: torch.Tensor,
-    ):
-        """
-        Update the SAC's Actor network for one optimizer step.
+        # Update actor
+        # Sample new actions and calculate log probabilities
+        action, action_log_prob = self.actor(obs_batch.float())
 
-        :param critic: The critic network.
-        :param actor: The actor network.
-        :param actor_optimizer: The actor's optimizer.
-        :param obs: Batch of current observations.
+        # Compute minimum Q-value for the new actions
+        q1_new, q2_new = self.q1(obs_batch, action), self.q2(obs_batch, action)
+        min_q = torch.min(q1_new, q2_new)
 
-        """
-        # Actor Update
-        action, action_log_prob = actor(obs)
-        entropy = - log_ent_coef.exp() * action_log_prob
-        q1, q2 = q1(obs, action), q2(obs, action)
-        q1_q2 = torch.cat([q1, q2], dim=1)
-        min_q = torch.min(q1_q2, 1, keepdim=True)[0]
-        actor_loss = (- min_q - entropy).mean()
-        actor_optimizer.zero_grad()
+        # Calculate actor loss with entropy term
+        entropy = -self.log_ent_coef.exp() * action_log_prob
+        actor_loss = (-min_q - entropy).mean()
+
+        # Update actor
+        self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        actor_optimizer.step()
+        self.actor_optimizer.step()
 
-    def update_entropy_coefficient(
-            self,
-            actor: nn.Module,
-            log_ent_coef: torch.Tensor,
-            target_entropy: float,
-            ent_coef_optimizer: optim.Optimizer,
-            obs: torch.Tensor,
-    ):
-        """
-        Automatic update for entropy coefficient (alpha)
-
-        :param actor: the actor network.
-        :param log_ent_coef: tensor representing the log of entropy coefficient (log_alpha).
-        :param target_entropy: tensor representing the desired target entropy.
-        :param ent_coef_optimizer: torch optimizer for entropy coefficient.
-        :param obs: current batch observation.
-        """
-        _, action_log_prob = actor(obs)
-        ent_coef_loss = -(log_ent_coef.exp() * (action_log_prob + target_entropy).detach()).mean()
-        ent_coef_optimizer.zero_grad()
+        # Update entropy coefficient
+        ent_coef_loss = -(self.log_ent_coef.exp() * (action_log_prob + self.target_entropy).detach()).mean()
+        self.ent_coef_optimizer.zero_grad()
         ent_coef_loss.backward()
-        ent_coef_optimizer.step()
+        self.ent_coef_optimizer.step()
+
+        # Update target networks via Polyak averaging
+        polyak_update(self.q1.parameters(), self.q1_target.parameters(), self.tau)
+        polyak_update(self.q2.parameters(), self.q2_target.parameters(), self.tau)
+        polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)

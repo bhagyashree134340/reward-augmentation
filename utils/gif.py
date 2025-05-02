@@ -12,14 +12,31 @@ def save_rgb_animation(rgb_arrays, filename, duration=50):
     log.info(f"Saved animation to {filename}")
 
 
-def rendered_rollout(policy, env, max_steps=1_000):
+def rendered_rollout(actor, env, return_data=False, max_steps=1000):
     obs, _ = env.reset()
-    imgs = [env.render()]
+    done = False
+    frames = []
+    data = {"observations": [], "actions": [], "rewards": []}
+
     for _ in range(max_steps):
+        frames.append(env.render())
+
+        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
-            action = policy(torch.as_tensor(obs, dtype=torch.float32))[0].cpu().numpy()
-        obs, _, terminated, truncated, _ = env.step(action)
-        imgs.append(env.render())
-        if terminated or truncated:
+            action, _ = actor(obs_tensor)
+            action = action.cpu().numpy()[0]
+
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+
+        if return_data:
+            data["observations"].append(obs)
+            data["actions"].append(action)
+            data["rewards"].append(reward)
+
+        if done:
             break
-    return imgs
+        obs = next_obs
+
+    return (frames, data) if return_data else frames
+
