@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -6,13 +8,16 @@ import copy
 import numpy as np
 import itertools
 
+from hydra.core.hydra_config import HydraConfig
+
 from networks.network import Critic, Actor
 from replay_buffer.replay_buffer import ReplayBuffer
+from utils.actor_io import save_actor
 from utils.polyak import polyak_update
 import logging
 
-from utils.validate import validate
 from utils.stats import EpisodeStats
+from utils.validate import validate_from_checkpoint
 
 log = logging.getLogger(__name__)
 
@@ -85,12 +90,8 @@ class SACAgent:
         )
         current_timestep = 0
         # TODO: log rewards every 100 eps then reset the accumulator
-        # to accumulate rewards every 100 eps
-        reward_accumulator = []
 
         for i_episode in range(num_episodes):
-            # TODO: Also log the average return(?) per 100 eps maybe
-
             avg_reward = sum(stats.episode_rewards) / len(stats.episode_rewards)
             max_reward = max(stats.episode_rewards)
             min_reward = min(stats.episode_rewards)
@@ -114,6 +115,7 @@ class SACAgent:
                     action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
                 next_obs, reward, terminated, truncated, _ = self.env.step(action)
 
+                #TODO: wandb integration
                 # Update statistics
                 stats.episode_rewards[i_episode] += reward
                 stats.episode_lengths[i_episode] += 1
@@ -141,7 +143,14 @@ class SACAgent:
                 obs = next_obs
 
             if i_episode % 10 == 0:
-                validate(self.actor, self.env, i_episode, max_steps)
+                # Save actor
+                # TODO: Add all paths to config maybe
+                actor_path = Path(HydraConfig.get().runtime.output_dir) / "checkpoints" / f"sac_actor_ep{i_episode:04d}.pt"
+                actor_path.parent.mkdir(parents=True, exist_ok=True)
+                save_actor(self.actor, actor_path)
+
+                # Run validation
+                validate_from_checkpoint(self.actor.__class__, self.env, actor_path, i_episode, max_steps)
 
         return stats
 

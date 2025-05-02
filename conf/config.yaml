@@ -4,13 +4,13 @@ defaults:
 #  - validation: validate
 
 seed: 42
-
-hydra:
-  mode: MULTIRUN
-  sweeper:
-    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
-    params:
-#      agent.lr: 0.001,0.0005
-      agent.batch_size: 32,64
-      agent.discount_factor: 0.98, 0.995
-      agent.tau: 0.01, 0.005
+#
+#hydra:
+#  mode: MULTIRUN
+#  sweeper:
+#    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+#    params:
+##      agent.lr: 0.001,0.0005
+#      agent.batch_size: 32,64
+#      agent.discount_factor: 0.98, 0.995
+#      agent.tau: 0.01, 0.005
