@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import torch
@@ -10,6 +11,9 @@ import itertools
 
 from hydra.core.hydra_config import HydraConfig
 
+from CFN.CFN import CoinFlipNetwork
+from CFN.cfn_buffer import CFNReplayBuffer
+from CFN.priority_util import get_coin_flips, compute_intrinsic_reward, compute_cfn_priority
 from networks.network import Critic, Actor
 from replay_buffer.replay_buffer import ReplayBuffer
 from utils.actor_io import save_actor
@@ -31,6 +35,7 @@ class SACAgent:
                  tau=0.005,
                  maxlen=100_000,
                  target_entropy=-1.0,
+                 cfn_cfg=None
                  ):
         """
         Initialize the SAC agent.
@@ -43,6 +48,15 @@ class SACAgent:
         :param tau: Polyak update coefficient.
         :param max_size: Maximum number of transitions in the buffer.
         """
+
+        if cfn_cfg is not None:
+            self.cfn_cfg = cfn_cfg
+            self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
+
+            # initialize CFN and its optimizer
+            self.cfn = CoinFlipNetwork(env.observation_space.shape[0], self.coin_flip_dim)
+            self.cfn_optimizer = optim.Adam(self.cfn.parameters(), lr=self.cfn_cfg.cfn_lr)
+            self.cfn_buffer = CFNReplayBuffer(max_size=self.cfn_cfg.cfn_replay_buffer_size)
 
         self.env = env
         self.gamma = gamma
@@ -89,7 +103,7 @@ class SACAgent:
             episode_rewards=np.zeros(num_episodes),
         )
         current_timestep = 0
-        # TODO: log rewards every 100 eps then reset the accumulator
+        # TODO: wandb integration
 
         for i_episode in range(num_episodes):
             avg_reward = sum(stats.episode_rewards) / len(stats.episode_rewards)
@@ -115,7 +129,13 @@ class SACAgent:
                     action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
                 next_obs, reward, terminated, truncated, _ = self.env.step(action)
 
-                #TODO: wandb integration
+                if self.cfn_cfg is not None:
+                    # compute intrinsic reward using eq 5
+                    intrinsic_reward = compute_intrinsic_reward(self.coin_flip_dim,
+                                                                self.cfn.compute_output_norm(torch.as_tensor(obs)
+                                                                                             .float()))
+                    reward += intrinsic_reward
+
                 # Update statistics
                 stats.episode_rewards[i_episode] += reward
                 stats.episode_lengths[i_episode] += 1
@@ -125,15 +145,33 @@ class SACAgent:
                     torch.as_tensor(obs, dtype=torch.float32),
                     torch.as_tensor(action),
                     torch.as_tensor(reward, dtype=torch.float32),
+                    # torch.as_tensor(intrinsic_reward, dtype=torch.float32),
                     torch.as_tensor(next_obs, dtype=torch.float32),
                     torch.as_tensor(terminated),
                 )
+
+                if self.cfn_cfg is not None:
+                    # Sample random coin-flip vector
+                    coin_flip = get_coin_flips(self.coin_flip_dim)
+
+                    # add state coin-flip tuple to B_c
+                    self.cfn_buffer.store(torch.tensor(obs), coin_flip.detach())
 
                 # Sample a mini batch from the replay buffer
                 obs_batch, act_batch, rew_batch, next_obs_batch, tm_batch = self.buffer.sample(self.batch_size)
 
                 # Update for critics, actor, and entropy coefficient
                 self.update(obs_batch, act_batch, rew_batch, next_obs_batch, tm_batch)
+
+                if self.cfn_cfg is not None:
+                    # sample minibatch from B_c and do an update
+                    obs_batch_bc, coin_flip_batch_bc, sample_counts, indices = self.cfn_buffer.sample(self.batch_size)
+
+                    self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
+
+                    # update priority for minibatch using eq 6
+                    self.cfn_buffer.update_priorities(indices,
+                                                      compute_cfn_priority(self.cfn, obs_batch_bc, sample_counts))
 
                 current_timestep += 1
 
@@ -145,7 +183,8 @@ class SACAgent:
             if i_episode % 10 == 0:
                 # Save actor
                 # TODO: Add all paths to config maybe
-                actor_path = Path(HydraConfig.get().runtime.output_dir) / "checkpoints" / f"sac_actor_ep{i_episode:04d}.pt"
+                actor_path = Path(
+                    HydraConfig.get().runtime.output_dir) / "checkpoints" / f"sac_actor_ep{i_episode:04d}.pt"
                 actor_path.parent.mkdir(parents=True, exist_ok=True)
                 save_actor(self.actor, actor_path)
 
@@ -219,3 +258,26 @@ class SACAgent:
         polyak_update(self.q1.parameters(), self.q1_target.parameters(), self.tau)
         polyak_update(self.q2.parameters(), self.q2_target.parameters(), self.tau)
         polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
+
+    def update_cfn(self, obs_batch: torch.Tensor, coin_flip_batch: torch.Tensor):
+        """
+        Update the Coin Flip Network with the current batch of states.
+
+        :param coin_flip_batch:
+        :param obs_batch: Batch of current observations.
+        """
+        # Compute the predicted coin flip vectors for the batch of states
+        predicted_coin_flips = self.cfn(obs_batch)
+
+        # Compute the loss with respect to the coin flip vectors
+        # (Assuming coin flip vectors are stored in the CFN replay buffer)
+
+        # i think this will be from the buffer and the get_coin_flips_for_batch will be stored into the cfn buffer
+        # coin_flips_batch = self.get_coin_flips_for_batch(obs_batch)
+
+        cfn_loss = F.mse_loss(predicted_coin_flips, coin_flip_batch)
+
+        # Backpropagate and update the CFN
+        self.cfn_optimizer.zero_grad()
+        cfn_loss.backward()
+        self.cfn_optimizer.step()

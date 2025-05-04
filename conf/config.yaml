@@ -1,9 +1,14 @@
 defaults:
   - agent: sac_agent
   - env: lunar_lander
+  - optional cfn: cfn
 #  - validation: validate
+#  - evaluate: evaulate
+
 
 seed: 42
+
+
 #
 #hydra:
 #  mode: MULTIRUN

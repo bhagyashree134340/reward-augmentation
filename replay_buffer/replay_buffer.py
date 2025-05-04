@@ -17,7 +17,8 @@ class ReplayBuffer:
         """Returns how many transitions are currently in the buffer."""
         return len(self.data)
 
-    def store(self, obs: torch.Tensor, action: torch.Tensor, reward: torch.Tensor, next_obs: torch.Tensor,
+    def store(self, obs: torch.Tensor, action: torch.Tensor, reward: torch.Tensor,
+              next_obs: torch.Tensor,
               terminated: torch.Tensor):
         """
         Adds a new transition to the buffer. When the buffer is full, overwrite the oldest transition.
@@ -39,6 +40,6 @@ class ReplayBuffer:
         Sample a batch of transitions uniformly and with replacement. The respective elements e.g. states, actions, rewards etc. are stacked
 
         :param batch_size: The batch size.
-        :returns: A tuple of tensors (obs_batch, action_batch, reward_batch, next_obs_batch, terminated_batch), where each tensors is stacked.
+        :returns: A tuple of tensors (obs_batch, action_batch, reward_batch, intrinsic_reward_batch, next_obs_batch, terminated_batch), where each tensors is stacked.
         """
         return [torch.stack(b) for b in zip(*random.choices(self.data, k=batch_size))]

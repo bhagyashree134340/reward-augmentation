@@ -31,25 +31,25 @@ def plot_training_stats(plot_path, stats, smoothing_window=20):
     log.info(f"Saved training plots to {plot_path}")
 
 
-def plot_returns_vs_timesteps(returns, lengths, save_path):
+def plot_rollout_rewards(plot_path, rewards, smoothing_window=20):
     """
     Plots validation return and episode length across validation episodes.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5), tight_layout=True)
+    fig, ax = plt.subplots(figsize=(6, 4), tight_layout=True)
 
-    axes[0].plot(returns)
-    axes[0].set_xlabel("Validation Episode (x10)")
-    axes[0].set_ylabel("Return")
-    axes[0].set_title("Validation Return")
+    rewards_smoothed = pd.Series(rewards).rolling(
+        smoothing_window, min_periods=smoothing_window
+    ).mean()
+    ax.plot(rewards_smoothed)
+    ax.set_xlabel("Episode time steps")
+    ax.set_ylabel("Episode Reward (Smoothed)")
+    ax.set_title(
+        f"Episode Reward over Time\n(Smoothed over window size {smoothing_window})"
+    )
 
-    axes[1].plot(lengths)
-    axes[1].set_xlabel("Validation Episode (x10)")
-    axes[1].set_ylabel("Episode Length")
-    axes[1].set_title("Validation Episode Length")
-
-    fig.savefig(save_path)
+    fig.savefig(plot_path)
     plt.close(fig)
-    log.info(f"Saved return vs timestep plot to {save_path}")
+    log.info(f"Saved training plots to {plot_path}")
 
 
 def plot_validation_stats(timesteps, returns, lengths, output_dir):

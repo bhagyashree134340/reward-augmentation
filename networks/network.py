@@ -67,3 +67,5 @@ class Critic(nn.Module):
         x = self.relu(self.fc2(x))
         out = self.fc3(x)
         return out
+
+

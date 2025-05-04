@@ -1,15 +1,12 @@
 import torch
 import gymnasium as gym
 from pathlib import Path
-from IPython.display import Image as IImage
 import hydra
 from omegaconf import DictConfig
 
 from utils.evaluate import evaluate
 from utils.misc import set_seed
-from networks.network import Actor
 from agents.sac_agent import SACAgent
-from utils.gif import rendered_rollout, save_rgb_animation
 from utils.plots import plot_training_stats
 import logging
 
@@ -37,7 +34,8 @@ def main(cfg: DictConfig):
         batch_size=cfg.agent.batch_size,
         tau=cfg.agent.tau,
         maxlen=cfg.agent.replay_buffer_size,
-        target_entropy=cfg.agent.target_entropy
+        target_entropy=cfg.agent.target_entropy,
+        cfn=cfg.cfn if cfg.get("cfn") else None
     )
 
     stats = agent.train(cfg.agent.num_episodes, cfg.agent.max_steps)
