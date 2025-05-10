@@ -1,6 +1,61 @@
 import torch
 import random
 
+import numpy as np
+import torch
+import wandb
+from cpprb import PrioritizedReplayBuffer
+
+
+class CFNReplayBufferWrapper:
+    def __init__(self, size, obs_shape, coin_flip_dim, alpha=0.5):
+        self.buffer = PrioritizedReplayBuffer(
+            size,
+            env_dict={
+                "obs": {"shape": obs_shape, "dtype": np.float32},
+                "coin_flip": {"shape": (coin_flip_dim,), "dtype": np.float32}
+            }
+        )
+        self.size = size
+        self.alpha = alpha
+
+        # counter tracking
+        self.counters = np.zeros(size, dtype=np.float32)
+        self.next_idx = 0
+
+    def get_stored_size(self):
+        return self.buffer.get_stored_size()
+
+    def add(self, obs, coin_flip, priority):
+        self.buffer.add(obs=obs, coin_flip=coin_flip, priority=priority)
+
+        # Maintain counters aligned with internal buffer
+        self.counters[self.next_idx] = 0
+        self.next_idx = (self.next_idx + 1) % self.size
+
+    def sample_and_update_priorities(self, batch_size, cfn, compute_cfn_priority_fn):
+        sample = self.buffer.sample(batch_size)
+        indices = sample["indexes"]
+
+        obs_batch = torch.tensor(sample["obs"], dtype=torch.float32)
+        coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32)
+
+        # Increment counters
+        for idx in indices:
+            self.counters[idx] += 1
+
+        # Get updated counters
+        counter_tensor = torch.tensor([self.counters[i] for i in indices], dtype=torch.float32)
+
+        # Compute new priorities
+        new_priorities = compute_cfn_priority_fn(cfn, obs_batch, counter_tensor, alpha=self.alpha)
+        new_priorities_np = new_priorities.detach().cpu().numpy()
+
+        # Update priorities in buffer
+        self.buffer.update_priorities(indices, new_priorities_np)
+
+        return obs_batch, coin_flip_batch, indices
+
 
 class CFNReplayBuffer:
     def __init__(self, max_size: int):
@@ -72,7 +127,3 @@ class CFNReplayBuffer:
         for i, p in zip(indices, new_priorities):
             state, coin, count, _ = self.data[i]
             self.data[i] = (state, coin, count, p)
-
-
-
-

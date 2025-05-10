@@ -37,3 +37,6 @@ def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: torch.Tensor) -> float:
         float: Intrinsic reward value.
 """
     return math.sqrt(cfn_norm.item() / coin_flip_d)
+
+
+
