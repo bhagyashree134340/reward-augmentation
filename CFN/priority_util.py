@@ -4,12 +4,13 @@ import torch
 import numpy as np
 
 
-def compute_cfn_priority(cfn, obs_batch, update_counts, alpha=0.5):
-    norms = cfn.compute_output_norm(obs_batch)
-    one_over_norms = 1. / (norms + 1e-6)
-    one_over_counts = 1. / (update_counts + 1.)
+def compute_cfn_priority(cfn, obs_batch, update_counts, coin_flip_dim, alpha=0.5):
+    norms = cfn.compute_squared_output_norm(obs_batch)
+    scaled_norms = norms / coin_flip_dim
+    # TODO: cant i add like 0.001 instead of 1.0 to avoid dividing by 0?
+    one_over_counts = 1.0 / (update_counts + 1.0)
+    priorities = alpha * one_over_counts + (1 - alpha) * scaled_norms
 
-    priorities = alpha * one_over_counts + (1 - alpha) * one_over_norms
     return priorities
 
 
@@ -36,7 +37,5 @@ def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: torch.Tensor) -> float:
     Returns:
         float: Intrinsic reward value.
 """
+    # torch.sqrt(cfn_squared_norms / coin_flip_d)? i dont think it's necessary
     return math.sqrt(cfn_norm.item() / coin_flip_d)
-
-
-

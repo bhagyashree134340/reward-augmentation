@@ -92,3 +92,8 @@ def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
     }
 
     return data
+
+
+def save_rollout_gif(actor, env, gif_path, max_steps=1000, duration=50):
+    frames = rendered_rollout(actor, env, return_data=False, max_steps=max_steps)
+    save_rgb_animation(frames, gif_path, duration=duration)

@@ -1,21 +1,14 @@
 from pathlib import Path
-
 import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-
 import copy
 import wandb
-from cpprb import PrioritizedReplayBuffer, ReplayBuffer
-
+from cpprb import ReplayBuffer
 from hydra.core.hydra_config import HydraConfig
-
-from CFN.CFN import CoinFlipNetwork
-from CFN.cfn_buffer import CFNReplayBufferWrapper
-from CFN.priority_util import get_coin_flips, compute_intrinsic_reward, compute_cfn_priority
 from networks.network import Critic, Actor
-from utils.gif import evaluate_policy
+from utils.evaluate import evaluate_and_log
 from utils.plots import plot_and_save_training_metrics, plot_eval_curve
 from utils.polyak import polyak_update
 import logging
@@ -33,8 +26,7 @@ class SACAgent:
                  batch_size=64,
                  tau=0.005,
                  maxlen=100_000,
-                 target_entropy=-1.0,
-                 cfn_cfg=None
+                 target_entropy=-1.0
                  ):
         """
         Initialize the SAC agent.
@@ -48,46 +40,22 @@ class SACAgent:
         :param max_size: Maximum number of transitions in the buffer.
         """
 
-        self.eval_returns_by_step = {}
         self.eval_envsteps, self.eval_means, self.eval_stds = [], [], []
-
-        if cfn_cfg is not None:
-            self.use_cfn_prior = getattr(cfn_cfg, "use_cfn_prior", False)
-            self.use_cfn_priority = getattr(cfn_cfg, "use_cfn_priority", False)
-            self.is_cfn = self.use_cfn_prior or self.use_cfn_priority
-            self.cfn_cfg = cfn_cfg
-            self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
-
-            # initialize CFN and its optimizer
-            self.cfn = CoinFlipNetwork(env.observation_space.shape[0], self.coin_flip_dim)
-            self.cfn_optimizer = optim.Adam(self.cfn.parameters(), lr=self.cfn_cfg.cfn_lr)
-
-            # self.cfn_buffer = CFNReplayBuffer(max_size=self.cfn_cfg.cfn_replay_buffer_size)
-            self.cfn_buffer = CFNReplayBufferWrapper(
-                size=self.cfn_cfg.cfn_replay_buffer_size,
-                obs_shape=env.observation_space.shape[0],
-                coin_flip_dim=self.coin_flip_dim,
-                alpha=0.5
-            )
-
-            self.prior_mean = torch.zeros(self.coin_flip_dim)
-            self.prior_var = torch.ones(self.coin_flip_dim)
-            self.prior_count = 1e-4
-
         self.env = env
         self.gamma = gamma
         self.batch_size = batch_size
         self.tau = tau
-        self.target_entropy = target_entropy
+        self.target_entropy = -np.prod(env.action_space.shape).item()
 
         # Initialize the Replay Buffer
         # self.buffer = ReplayBuffer(maxlen)
-        self.buffer = PrioritizedReplayBuffer(
+        self.buffer = ReplayBuffer(
             size=maxlen,
             env_dict={
                 "obs": {"shape": env.observation_space.shape[0]},
                 "act": {"shape": env.action_space.shape[0]},
-                "rew": {},
+                "ext_rew": {},
+                "int_rew": {},
                 "next_obs": {"shape": env.observation_space.shape[0]},
                 "done": {}
             }
@@ -141,41 +109,20 @@ class SACAgent:
 
             next_obs, reward, terminated, truncated, _ = self.env.step(action)
 
-            if self.is_cfn:
-                intrinsic_reward = compute_intrinsic_reward(
-                    self.coin_flip_dim,
-                    self.cfn.compute_output_norm(torch.as_tensor(obs).float())
-                )
-                reward += intrinsic_reward
-
-                # normalising the prior network
-                self. self.cfn(torch.as_tensor(obs).float(), update_prior_stats=True) if self.use_cfn_prior else _
-
             done = terminated or truncated
+
+            wandb.log({
+                "ext_reward": reward
+            })
 
             self.buffer.add(
                 obs=np.array(obs, dtype=np.float32),
                 act=np.array(action, dtype=np.float32),
-                rew=np.array(reward, dtype=np.float32),
+                ext_rew=np.array(reward, dtype=np.float32),
+                int_rew=np.array(0, dtype=np.float32),
                 next_obs=np.array(next_obs, dtype=np.float32),
-                done=np.array(terminated, dtype=np.float32)
+                done=np.array(done, dtype=np.float32)
             )
-
-            if self.is_cfn:
-                coin_flip = get_coin_flips(self.coin_flip_dim)
-                # self.cfn_buffer.store(torch.tensor(obs), coin_flip.detach())
-
-                # priority = (
-                #     compute_cfn_priority(self.cfn, torch.tensor(obs).unsqueeze(0), torch.tensor([1.0]))[0].item()
-                #     if self.use_cfn_priority
-                #     else 1.0
-                # )
-
-                self.cfn_buffer.add(
-                    obs=np.array(obs, dtype=np.float32),
-                    coin_flip=coin_flip.detach().numpy(),
-                    priority=1.0
-                )
 
             # Sample and update
             if self.buffer.get_stored_size() >= self.batch_size:
@@ -185,24 +132,12 @@ class SACAgent:
 
                 obs_batch = torch.tensor(sample["obs"], dtype=torch.float32)
                 act_batch = torch.tensor(sample["act"], dtype=torch.float32)
-                rew_batch = torch.tensor(sample["rew"], dtype=torch.float32).squeeze(-1)
+                ext_rew_batch = torch.tensor(sample["ext_rew"], dtype=torch.float32).squeeze(-1)
+                # int_rew_batch = torch.tensor(sample["int_rew"], dtype=torch.float32).squeeze(-1)
                 next_obs_batch = torch.tensor(sample["next_obs"], dtype=torch.float32)
                 tm_batch = torch.tensor(sample["done"], dtype=torch.float32).squeeze(-1)
 
-                self.update(obs_batch, act_batch, rew_batch, next_obs_batch, tm_batch)
-
-            if self.is_cfn:
-                if self.cfn_buffer.get_stored_size() >= self.cfn_cfg.cfn_batch_size:
-                    # obs_batch_bc, coin_flip_batch_bc, sample_counts, indices = self.cfn_buffer.sample(self.batch_size)
-
-                    # Sampling + updating
-                    obs_batch_bc, coin_flip_batch_bc, _ = self.cfn_buffer.sample_and_update_priorities(
-                        batch_size=self.batch_size,
-                        cfn=self.cfn,
-                        compute_cfn_priority_fn=compute_cfn_priority
-                    )
-
-                    self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
+                self.update(obs_batch, act_batch, ext_rew_batch, next_obs_batch, tm_batch)
 
             obs = next_obs
             episode_return += reward
@@ -217,8 +152,9 @@ class SACAgent:
                 wandb.log({
                     "episode return": episode_return,
                     "episode length": episode_step,
-                    "episode num": episode_num,
-                    "reward": reward
+                    "episode num": episode_num
+                    # "intrinsic rewards": intrinsic_reward,
+                    # "reward": reward
                 }, step=current_timestep)
 
                 log.info(
@@ -231,38 +167,12 @@ class SACAgent:
                 episode_step = 0
                 episode_num += 1
 
-            # Save & validate periodically
+            # Save & evaluate periodically
             if current_timestep % 1000 == 0:
-                # self.cfn.eval()
-
-                # Evaluate policy
-                eval_data = evaluate_policy(self.actor, self.env, num_episodes=10, max_steps=max_steps)
-
-                mean_r = np.mean(eval_data["episode_rewards"])
-                std_r = np.std(eval_data["episode_rewards"])
-                self.eval_returns_by_step[current_timestep] = eval_data["episode_rewards"]
-
-                # Save actor checkpoint
-                actor_path = Path(
-                    HydraConfig.get().runtime.output_dir) / "checkpoints" / f"sac_actor_step{current_timestep}.pt"
-                actor_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(self.actor.state_dict(), actor_path)
-
-                # Save evaluation data (.npz)
-                eval_dir = Path(HydraConfig.get().runtime.output_dir) / "evaluate"
-                eval_dir.mkdir(parents=True, exist_ok=True)
-                np.savez(eval_dir / f"evaluation_step{current_timestep}.npz", **eval_data)
-
-                # Log to WandB
-                wandb.log({
-                    "eval_mean_return": mean_r,
-                    "eval_std_return": std_r,
-                }, step=current_timestep)
-
-                # Save data for plotting
-                self.eval_envsteps.append(current_timestep)
-                self.eval_means.append(mean_r)
-                self.eval_stds.append(std_r)
+                eval_envstep, eval_mean, eval_std = evaluate_and_log(self.actor, self.env, current_timestep, max_steps)
+                self.eval_envsteps.append(eval_envstep)
+                self.eval_means.append(eval_mean)
+                self.eval_stds.append(eval_std)
 
         stats = EpisodeStats(
             episode_lengths=episode_lengths,
@@ -280,9 +190,6 @@ class SACAgent:
         plot_path = Path(
             HydraConfig.get().runtime.output_dir) / "validate" / f"eval_plot_step{current_timestep}.png"
         plot_eval_curve(self.eval_envsteps, self.eval_means, self.eval_stds, plot_path)
-
-        # save_path = Path(HydraConfig.get().runtime.output_dir) / "validate" / "return_distributions.png"
-        # plot_return_distributions(self.eval_returns_by_step, save_path)
 
     def update(
             self,
@@ -344,28 +251,4 @@ class SACAgent:
         ):
             polyak_update(param.parameters(), target_param.parameters(), self.tau)
 
-    def update_cfn(self, obs_batch: torch.Tensor, coin_flip_batch: torch.Tensor):
-        """
-        Update the Coin Flip Network with the current batch of states.
 
-        :param coin_flip_batch:
-        :param obs_batch: Batch of current observations.
-        """
-
-        torch.autograd.set_detect_anomaly(True)
-
-        # Compute the predicted coin flip vectors for the batch of states
-        predicted_coin_flips = self.cfn(obs_batch)
-
-        # Compute the loss with respect to the coin flip vectors
-        # (Assuming coin flip vectors are stored in the CFN replay buffer)
-
-        # i think this will be from the buffer and the get_coin_flips_for_batch will be stored into the cfn buffer
-        # coin_flips_batch = self.get_coin_flips_for_batch(obs_batch)
-
-        cfn_loss = F.mse_loss(predicted_coin_flips, coin_flip_batch)
-
-        # Backpropagate and update the CFN
-        self.cfn_optimizer.zero_grad()
-        cfn_loss.backward()
-        self.cfn_optimizer.step()

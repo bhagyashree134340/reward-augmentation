@@ -1,21 +1,23 @@
-import torch
 import random
-
 import numpy as np
 import torch
-import wandb
 from cpprb import PrioritizedReplayBuffer
+
+from CFN.priority_util import compute_cfn_priority
 
 
 class CFNReplayBufferWrapper:
     def __init__(self, size, obs_shape, coin_flip_dim, alpha=0.5):
+
         self.buffer = PrioritizedReplayBuffer(
             size,
             env_dict={
                 "obs": {"shape": obs_shape, "dtype": np.float32},
-                "coin_flip": {"shape": (coin_flip_dim,), "dtype": np.float32}
+                "coin_flip": {"shape": (coin_flip_dim,), "dtype": np.float32},
+                # "update_count": {"shape": (), "dtype": np.float32},
             }
         )
+
         self.size = size
         self.alpha = alpha
 
@@ -33,26 +35,26 @@ class CFNReplayBufferWrapper:
         self.counters[self.next_idx] = 0
         self.next_idx = (self.next_idx + 1) % self.size
 
-    def sample_and_update_priorities(self, batch_size, cfn, compute_cfn_priority_fn):
+    def sample_and_update_priorities(self, batch_size, cfn, coin_flip_dim, use_cfn_priority):
         sample = self.buffer.sample(batch_size)
         indices = sample["indexes"]
 
+        # Get tensors
         obs_batch = torch.tensor(sample["obs"], dtype=torch.float32)
         coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32)
 
-        # Increment counters
-        for idx in indices:
-            self.counters[idx] += 1
+        if use_cfn_priority:
+            for idx in indices:
+                self.counters[idx] += 1
 
-        # Get updated counters
-        counter_tensor = torch.tensor([self.counters[i] for i in indices], dtype=torch.float32)
+            counts = torch.tensor([self.counters[i] for i in indices], dtype=torch.float32)
 
-        # Compute new priorities
-        new_priorities = compute_cfn_priority_fn(cfn, obs_batch, counter_tensor, alpha=self.alpha)
-        new_priorities_np = new_priorities.detach().cpu().numpy()
+            # Compute new priorities
+            new_priorities = compute_cfn_priority(cfn, obs_batch, counts, coin_flip_dim, alpha=self.alpha)
+            new_priorities_np = new_priorities.detach().cpu().numpy()
 
-        # Update priorities in buffer
-        self.buffer.update_priorities(indices, new_priorities_np)
+            # Update priorities in buffer
+            self.buffer.update_priorities(indices, new_priorities_np)
 
         return obs_batch, coin_flip_batch, indices
 

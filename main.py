@@ -1,7 +1,11 @@
+import time
+
 import gymnasium as gym
 from pathlib import Path
 import hydra
 from omegaconf import DictConfig
+
+from agents.sac_cfn_agent import SACCFNAgent
 from utils.misc import set_seed
 from agents.sac_agent import SACAgent
 import logging
@@ -33,23 +37,39 @@ def main(cfg: DictConfig):
     env = gym.make(cfg.env.id, continuous=cfg.env.continuous, gravity=cfg.env.gravity, render_mode=cfg.env.render_mode)
 
     log.info(f"Training on {env.spec.id}")
-    log.info(f"gamma={cfg.agent.discount_factor} | lr={cfg.agent.lr} | batch_size={cfg.agent.batch_size} | cfn={cfg.cfn.get('enabled')}")
+    log.info(f"gamma={cfg.agent.discount_factor} | lr={cfg.agent.lr} | batch_size={cfg.agent.batch_size}")
 
-    agent = SACAgent(
-        env,
-        gamma=cfg.agent.discount_factor,
-        lr=cfg.agent.lr,
-        batch_size=cfg.agent.batch_size,
-        tau=cfg.agent.tau,
-        maxlen=cfg.agent.replay_buffer_size,
-        target_entropy=cfg.agent.target_entropy,
-        cfn_cfg=cfg.cfn if cfg.cfn.get("enabled") else None
-    )
+    if cfg.agent.cfn:
+        agent = SACCFNAgent(
+            env,
+            gamma=cfg.agent.discount_factor,
+            lr=cfg.agent.lr,
+            batch_size=cfg.agent.batch_size,
+            tau=cfg.agent.tau,
+            maxlen=cfg.agent.replay_buffer_size,
+            target_entropy=cfg.agent.target_entropy,
+            cfn_cfg=cfg.cfn if cfg.cfn.get("enabled") else None
+        )
+    else:
+        agent = SACAgent(
+            env,
+            gamma=cfg.agent.discount_factor,
+            lr=cfg.agent.lr,
+            batch_size=cfg.agent.batch_size,
+            tau=cfg.agent.tau,
+            maxlen=cfg.agent.replay_buffer_size,
+            target_entropy=cfg.agent.target_entropy,
+        )
+
+    start_time = time.time()
 
     agent.train(cfg.agent.num_env_steps, cfg.agent.max_steps)
+    end_time = time.time()
+    elapsed_time = end_time - start_time
 
-    # plot_training_stats(plots_dir / "training_stats.png", stats)
-    # evaluate()
+    hours, rem = divmod(elapsed_time, 3600)
+    minutes, seconds = divmod(rem, 60)
+    log.info(f"\n[✓] Training finished in {int(hours)}h {int(minutes)}m {int(seconds)}s")
 
 
 if __name__ == "__main__":

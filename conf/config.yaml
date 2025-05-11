@@ -19,3 +19,14 @@ seed: 42
 #      agent.batch_size: 32,64
 #      agent.discount_factor: 0.98, 0.995
 #      agent.tau: 0.01, 0.005
+
+
+hydra:
+  mode: MULTIRUN
+  sweeper:
+    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+    params:
+      cfn.cfn_lr: 0.001, 0.005
+      cfn.cfn_replay_buffer_size: 100000
+      cfn.cfn_batch_size: 32, 64
+      cfn.cfn_coin_flip_dim: 16, 20

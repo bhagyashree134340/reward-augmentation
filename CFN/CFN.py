@@ -26,7 +26,7 @@ class CoinFlipNetwork(nn.Module):
         self.register_buffer("prior_var", torch.ones(coin_dim))
         self.register_buffer("prior_count", torch.tensor(1e-4))  # to avoid div by 0
 
-    def forward(self, state, update_prior_stats=True):
+    def forward(self, state, update_prior_stats=False):
         """
         Args:
             state (torch.Tensor): input tensor of shape [batch_size, state_dim]
@@ -43,38 +43,52 @@ class CoinFlipNetwork(nn.Module):
             self.update_prior_stats(prior_out)
 
         # Normalize prior using running mean and variance (using Welford's algorithm)
-        normalized_prior = (prior_out - self.prior_mean) / ((self.prior_var / self.prior_count) + 1e-8).sqrt()
+        # normalized_prior = (prior_out - self.prior_mean) / ((self.prior_var / self.prior_count) + 1e-8).sqrt()
+        normalized_prior = (prior_out - self.prior_mean) / (self.prior_var / self.prior_count + 1e-8).sqrt()
 
         # Add normalized prior to trainable network output
         return self.net(state) + normalized_prior
 
-    def compute_output_norm(self, obs):
+    def compute_squared_output_norm(self, obs):
         """
-        Compute the L2 norm (Euclidean norm) of the network's output fϕ(s).
-
-        Args:
-            state (torch.Tensor): A single state tensor of shape [state_dim]
-                                  or a batch of states [batch_size, state_dim]
-
-        Returns:
-            torch.Tensor: The norm(s) of the output(s), shape [batch_size] or scalar
+        Compute the squared L2 norm (‖fϕ(s)‖²) of the network's output.
         """
+        # with torch.no_grad():
+        #     output = self.forward(obs, update_prior_stats=False)
+        #     return torch.sum(output ** 2)
+
         with torch.no_grad():
             output = self.forward(obs, update_prior_stats=False)
             norm = torch.norm(output, p=2, dim=-1)
-            return norm
+            return norm ** 2
 
     def update_prior_stats(self, prior_output):
-        """
-        Update running mean and variance using Welford's algorithm.
-        This version processes each sample in the batch individually.
-        """
-
-        # TODO: make faster by calculating for the entire batch
         with torch.no_grad():
-            for sample in prior_output:
+            for i in range(prior_output.size(0)):
+                value = prior_output[i]
                 self.prior_count += 1
-                delta = sample - self.prior_mean
+                delta = value - self.prior_mean
                 self.prior_mean += delta / self.prior_count
-                delta2 = sample - self.prior_mean
+
+                delta2 = value - self.prior_mean
                 self.prior_var += delta * delta2
+
+    # def update_prior_stats(self, prior_output):
+    #     with torch.no_grad():
+    #         batch_mean = prior_output.mean(dim=0)
+    #         batch_var = prior_output.var(dim=0, unbiased=False)
+    #         batch_size = prior_output.shape[0]
+    #
+    #         total_count = self.prior_count + batch_size
+    #
+    #         delta = batch_mean - self.prior_mean
+    #         new_mean = self.prior_mean + delta * batch_size / total_count
+    #
+    #         m_a = self.prior_var * self.prior_count
+    #         m_b = batch_var * batch_size
+    #         M2 = m_a + m_b + delta ** 2 * self.prior_count * batch_size / total_count
+    #         new_var = M2 / total_count
+    #
+    #         self.prior_mean = new_mean
+    #         self.prior_var = new_var
+    #         self.prior_count = total_count
