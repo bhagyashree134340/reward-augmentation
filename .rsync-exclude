@@ -1,0 +1,6 @@
+rlvenv/
+wandb/
+outputs/
+multirun/
+.idea/
+__pycache__/

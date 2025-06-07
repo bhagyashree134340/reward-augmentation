@@ -1,45 +1,54 @@
-import torch
-import random
+import numpy as np
+from cpprb import ReplayBuffer, HindsightReplayBuffer
+from gymnasium.spaces import Box, Dict as SpaceDict
 
 
-class ReplayBuffer:
-    def __init__(self, max_size: int):
-        """
-        Create the replay buffer.
+def make_replay_buffer(env, buffer_size=1_000_000, use_her=True, max_episode_len=100):
+    obs_space = env.observation_space
+    act_space = env.action_space
 
-        :param max_size: Maximum number of transitions in the buffer.
-        """
-        self.data = []
-        self.max_size = max_size
-        self.position = 0
+    # HER only makes sense if the env uses a Dict observation space with desired_goal
+    is_goal_env = isinstance(obs_space, SpaceDict) and "desired_goal" in obs_space.spaces
+    use_her = use_her and is_goal_env
 
-    def __len__(self) -> int:
-        """Returns how many transitions are currently in the buffer."""
-        return len(self.data)
+    if use_her:
+        print("Using HER-enabled replay buffer.")
 
-    def store(self, obs: torch.Tensor, action: torch.Tensor, reward: torch.Tensor,
-              next_obs: torch.Tensor,
-              terminated: torch.Tensor):
-        """
-        Adds a new transition to the buffer. When the buffer is full, overwrite the oldest transition.
+        obs_shape = obs_space["observation"].shape
+        goal_shape = obs_space["desired_goal"].shape
+        act_shape = act_space.shape
 
-        :param obs: The current observation.
-        :param action: The action.
-        :param reward: The reward.
-        :param next_obs: The next observation.
-        :param terminated: Whether the episode terminated.
-        """
-        if len(self.data) < self.max_size:
-            self.data.append((obs, action, reward, next_obs, terminated))
-        else:
-            self.data[self.position] = (obs, action, reward, next_obs, terminated)
-        self.position = (self.position + 1) % self.max_size
+        def reward_func(achieved_goal, desired_goal, _info):
+            return (np.linalg.norm(achieved_goal - desired_goal, axis=-1) < 0.05).astype(np.float32)
 
-    def sample(self, batch_size: int) -> torch.Tensor:
-        """
-        Sample a batch of transitions uniformly and with replacement. The respective elements e.g. states, actions, rewards etc. are stacked
+        env_dict = {
+            "obs": {"shape": obs_shape},
+            "act": {"shape": act_shape},
+            "next_obs": {"shape": obs_shape},
+            "done": {},
+            "rew": {},
+            "goal": {"shape": goal_shape},
+            "next_goal": {"shape": goal_shape},
+            "achieved_goal": {"shape": goal_shape},
+            "next_achieved_goal": {"shape": goal_shape},
+        }
 
-        :param batch_size: The batch size.
-        :returns: A tuple of tensors (obs_batch, action_batch, reward_batch, intrinsic_reward_batch, next_obs_batch, terminated_batch), where each tensors is stacked.
-        """
-        return [torch.stack(b) for b in zip(*random.choices(self.data, k=batch_size))]
+        return HindsightReplayBuffer(
+            size=buffer_size,
+            env_dict=env_dict,
+            max_episode_len=max_episode_len,
+            reward_func=reward_func,
+        )
+
+    else:
+        return ReplayBuffer(
+            size=buffer_size,
+            env_dict={
+                "obs": {"shape": env.observation_space.shape[0]},
+                "act": {"shape": env.action_space.shape[0]},
+                "ext_rew": {},
+                "int_rew": {},
+                "next_obs": {"shape": env.observation_space.shape[0]},
+                "done": {}
+            }
+        )

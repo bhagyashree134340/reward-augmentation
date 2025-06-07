@@ -8,12 +8,14 @@ import wandb
 from cpprb import ReplayBuffer
 from hydra.core.hydra_config import HydraConfig
 from networks.network import Critic, Actor
-from utils.evaluate import evaluate_and_log
+from utils.evaluate import evaluate
+from utils.gif import save_rollout_gif
 from utils.plots import plot_and_save_training_metrics, plot_eval_curve
 from utils.polyak import polyak_update
 import logging
 
 from utils.stats import EpisodeStats
+from utils.validate import validate
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ log = logging.getLogger(__name__)
 class SACAgent:
     def __init__(self,
                  env,
+                 eval_env,
                  gamma=0.99,
                  lr=0.001,
                  batch_size=64,
@@ -42,6 +45,7 @@ class SACAgent:
 
         self.eval_envsteps, self.eval_means, self.eval_stds = [], [], []
         self.env = env
+        self.eval_env = eval_env
         self.gamma = gamma
         self.batch_size = batch_size
         self.tau = tau
@@ -169,7 +173,9 @@ class SACAgent:
 
             # Save & evaluate periodically
             if current_timestep % 1000 == 0:
-                eval_envstep, eval_mean, eval_std = evaluate_and_log(self.actor, self.env, current_timestep, max_steps)
+                validate(self.actor, current_timestep)
+
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.env, current_timestep, max_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)
@@ -191,6 +197,9 @@ class SACAgent:
             HydraConfig.get().runtime.output_dir) / "validate" / f"eval_plot_step{current_timestep}.png"
         plot_eval_curve(self.eval_envsteps, self.eval_means, self.eval_stds, plot_path)
 
+        save_rollout_gif(self.actor, self.env,  Path(
+            HydraConfig.get().runtime.output_dir) / "validate" / f"eval_gif{current_timestep}.gif")
+
     def update(
             self,
             obs_batch: torch.Tensor,
@@ -198,6 +207,7 @@ class SACAgent:
             rew_batch: torch.Tensor,
             next_obs_batch: torch.Tensor,
             tm_batch: torch.Tensor,
+            current_step
     ):
         """
         Update function that updates critics, actor, and entropy coefficient.
@@ -219,10 +229,15 @@ class SACAgent:
             q_target = rew_batch + self.gamma * not_done * (
                     q_target_min - ent_coef * next_log_prob.sum(dim=-1, keepdim=True))
 
+        q_losses = []
+        q_preds = []
+
         # Update both Q-functions
         for q_func, q_opt in [(self.q1, self.q1_optimizer), (self.q2, self.q2_optimizer)]:
             q_pred = q_func(obs_batch, act_batch)
+            q_preds.append(q_pred)
             q_loss = F.mse_loss(q_pred, q_target)
+            q_losses.append(q_loss.item())
             q_opt.zero_grad()
             q_loss.backward()
             q_opt.step()
@@ -245,10 +260,20 @@ class SACAgent:
         self.ent_coef_optimizer.step()
 
         # Polyak averaging for target networks
-        for param, target_param in zip(
-                [self.q1, self.q2, self.actor],
-                [self.q1_target, self.q2_target, self.actor_target]
-        ):
-            polyak_update(param.parameters(), target_param.parameters(), self.tau)
+        polyak_update(self.q1.parameters(), self.q1_target.parameters(), self.tau)
+        polyak_update(self.q2.parameters(), self.q2_target.parameters(), self.tau)
+        polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
+
+        # TODO: Add current time step
+        # wandb.log({
+        #     "loss/q1_loss": q_losses[0],
+        #     "loss/q2_loss": q_losses[1],
+        #     "loss/actor_loss": actor_loss.item(),
+        #     "loss/ent_coef_loss": ent_coef_loss.item(),
+        #     "policy/entropy": -new_log_prob.mean().item(),
+        #     "q_values/q1_mean": q1_new.mean().item(),
+        #     "q_values/q2_mean": q2_new.mean().item(),
+        #     "ent_coef/value": ent_coef.item(),
+        # }, step=current_step)
 
 

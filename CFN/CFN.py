@@ -21,57 +21,50 @@ class CoinFlipNetwork(nn.Module):
             nn.Linear(hidden_dim, coin_dim)
         )
 
-        # Initialize running statistics for prior normalization
-        self.register_buffer("prior_mean", torch.zeros(coin_dim))
-        self.register_buffer("prior_var", torch.ones(coin_dim))
-        self.register_buffer("prior_count", torch.tensor(1e-4))  # to avoid div by 0
+        for param in self.prior.parameters():
+            param.requires_grad = False
+
+        # Running statistics to normalize prior output acc to the paper: E[‖f_prior(s)‖²] = 1
+        self.register_buffer("prior_squared_norm_mean", torch.tensor(1.0))
+        self.register_buffer("prior_squared_norm_count", torch.tensor(1e-4))
 
     def forward(self, state, update_prior_stats=False):
         """
-        Args:
-            state (torch.Tensor): input tensor of shape [batch_size, state_dim]
-            update_prior_stats (bool): whether to update running stats (True during training)
 
-        Returns:
-            torch.Tensor: output of the CFN, shape [batch_size, coin_dim]
+        :param state:
+        :param update_prior_stats:
+        :return:
         """
-        # Compute prior output without tracking gradients
-        prior_out = self.prior(state).detach()
+        with torch.no_grad():
+            prior_out = self.prior(state)
 
-        # Update stats only if requested (e.g., during training)
-        if update_prior_stats:
-            self.update_prior_stats(prior_out)
+            if update_prior_stats:
+                self.update_prior_stats(prior_out)
 
-        # Normalize prior using running mean and variance (using Welford's algorithm)
-        # normalized_prior = (prior_out - self.prior_mean) / ((self.prior_var / self.prior_count) + 1e-8).sqrt()
-        normalized_prior = (prior_out - self.prior_mean) / (self.prior_var / self.prior_count + 1e-8).sqrt()
+            norm_factor = (self.prior_squared_norm_mean + 1e-8).sqrt()
+            normalized_prior = prior_out / norm_factor
 
-        # Add normalized prior to trainable network output
         return self.net(state) + normalized_prior
 
     def compute_squared_output_norm(self, obs):
         """
         Compute the squared L2 norm (‖fϕ(s)‖²) of the network's output.
         """
-        # with torch.no_grad():
-        #     output = self.forward(obs, update_prior_stats=False)
-        #     return torch.sum(output ** 2)
-
         with torch.no_grad():
             output = self.forward(obs, update_prior_stats=False)
-            norm = torch.norm(output, p=2, dim=-1)
-            return norm ** 2
+            return torch.norm(output, p=2, dim=-1) ** 2
 
     def update_prior_stats(self, prior_output):
+        """
+        Updates running estimate of E[‖f_prior(s)‖²]
+        """
         with torch.no_grad():
-            for i in range(prior_output.size(0)):
-                value = prior_output[i]
-                self.prior_count += 1
-                delta = value - self.prior_mean
-                self.prior_mean += delta / self.prior_count
+            batch_squared_norms = prior_output.pow(2).sum(dim=-1)
+            batch_mean = batch_squared_norms.mean()
 
-                delta2 = value - self.prior_mean
-                self.prior_var += delta * delta2
+            self.prior_squared_norm_count += 1
+            delta = batch_mean - self.prior_squared_norm_mean
+            self.prior_squared_norm_mean += delta / self.prior_squared_norm_count
 
     # def update_prior_stats(self, prior_output):
     #     with torch.no_grad():

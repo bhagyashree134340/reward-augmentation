@@ -1,44 +1,10 @@
+import imageio
 import numpy as np
 from PIL import Image
 import torch
 import logging
 
 log = logging.getLogger(__name__)
-
-
-def save_rgb_animation(rgb_arrays, filename, duration=50):
-    frames = [Image.fromarray((img).astype(np.uint8)) for img in rgb_arrays]
-    frames[0].save(filename, save_all=True, append_images=frames[1:], duration=duration, loop=0)
-    log.info(f"Saved animation to {filename}")
-
-
-def rendered_rollout(actor, env, return_data=False, max_steps=1000):
-    obs, _ = env.reset()
-    done = False
-    frames = []
-    data = {"observations": [], "actions": [], "rewards": []}
-
-    for _ in range(max_steps):
-        frames.append(env.render())
-
-        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            action, _ = actor(obs_tensor)
-            action = action.cpu().numpy()[0]
-
-        next_obs, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-
-        if return_data:
-            data["observations"].append(obs)
-            data["actions"].append(action)
-            data["rewards"].append(reward)
-
-        if done:
-            break
-        obs = next_obs
-
-    return (frames, data) if return_data else frames
 
 
 def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
@@ -94,6 +60,49 @@ def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
     return data
 
 
-def save_rollout_gif(actor, env, gif_path, max_steps=1000, duration=50):
-    frames = rendered_rollout(actor, env, return_data=False, max_steps=max_steps)
-    save_rgb_animation(frames, gif_path, duration=duration)
+def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
+    import imageio
+    import torch
+    import numpy as np
+
+    frames = []
+    obs, _ = env.reset()
+    done = False
+    step = 0
+    actor.eval()
+
+    env.render()
+
+    if "Fetch" in env.spec.id:
+        base_env = env
+        while hasattr(base_env, "env"):
+            base_env = base_env.env
+
+        try:
+            cam = base_env.mujoco_renderer.viewer.cam
+            cam.distance = 5
+            cam.lookat[:] = [1.3, 0.75, 0.5]
+            cam.azimuth = 180
+            cam.elevation = -20
+        except Exception as e:
+            log.info("Failed to adjust Fetch camera settings:", e)
+
+    while not done and step < max_episode_steps:
+        frame = env.render()
+        frames.append(frame)
+
+        obs_tensor = torch.FloatTensor(
+            obs if not isinstance(obs, dict)
+            else np.concatenate([v.flatten() for v in obs.values()])
+        ).unsqueeze(0)
+
+        with torch.no_grad():
+            action, _ = actor(obs_tensor)
+            action = action.cpu().numpy()[0]
+
+        obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        step += 1
+
+    actor.train()
+    imageio.mimsave(gif_path, frames, fps=30)

@@ -1,14 +1,13 @@
 defaults:
   - agent: sac_agent
-  - env: lunar_lander
+  - env: fetch
   - cfn: cfn
-#  - validation: validate
-#  - evaluate: evaulate
-
 
 seed: 42
 
-
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${agent.id}-${env.id}-${cfn.enabled}
 #
 #hydra:
 #  mode: MULTIRUN
@@ -21,12 +20,12 @@ seed: 42
 #      agent.tau: 0.01, 0.005
 
 
-hydra:
-  mode: MULTIRUN
-  sweeper:
-    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
-    params:
-      cfn.cfn_lr: 0.001, 0.005
-      cfn.cfn_replay_buffer_size: 100000
-      cfn.cfn_batch_size: 32, 64
-      cfn.cfn_coin_flip_dim: 16, 20
+#hydra:
+#  mode: MULTIRUN
+#  sweeper:
+#    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+#    params:
+#      cfn.cfn_lr: 0.001, 0.005
+#      cfn.cfn_replay_buffer_size: 100000
+#      cfn.cfn_batch_size: 32, 64
+#      cfn.cfn_coin_flip_dim: 16, 20

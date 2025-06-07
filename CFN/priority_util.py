@@ -2,6 +2,7 @@ import math
 
 import torch
 import numpy as np
+from torch import Tensor
 
 
 def compute_cfn_priority(cfn, obs_batch, update_counts, coin_flip_dim, alpha=0.5):
@@ -26,7 +27,7 @@ def get_coin_flips(coin_flip_dim) -> torch.Tensor:
     return torch.from_numpy(coin_flips).float()
 
 
-def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: torch.Tensor) -> float:
+def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: torch.Tensor) -> Tensor:
     """
     Computes intrinsic reward using coin-flip vector dimensionality and its norm.
 
@@ -38,4 +39,4 @@ def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: torch.Tensor) -> float:
         float: Intrinsic reward value.
 """
     # torch.sqrt(cfn_squared_norms / coin_flip_d)? i dont think it's necessary
-    return math.sqrt(cfn_norm.item() / coin_flip_d)
+    return torch.sqrt(cfn_norm / coin_flip_d)

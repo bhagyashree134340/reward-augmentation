@@ -35,6 +35,9 @@ class CFNReplayBufferWrapper:
         self.counters[self.next_idx] = 0
         self.next_idx = (self.next_idx + 1) % self.size
 
+    def sample(self, batch_size):
+        return self.buffer.sample(batch_size)
+
     def sample_and_update_priorities(self, batch_size, cfn, coin_flip_dim, use_cfn_priority):
         sample = self.buffer.sample(batch_size)
         indices = sample["indexes"]
