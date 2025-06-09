@@ -1,11 +1,11 @@
 id: sac_agent
-lr: 0.001
+lr: 0.00005 #0.001 #0.00005
 batch_size: 256 #32 #128
 replay_buffer_size: 100000  # 100
 tau: 0.005
-num_env_steps:  300000 #300000
+num_env_steps:  500000 #300000
 discount_factor: 0.99
-target_entropy: -1.0
+target_entropy: -4.0
 max_steps: 1000
 checkpoint_frequency: 10
 cfn: True

@@ -22,6 +22,8 @@ from hydra.core.hydra_config import HydraConfig
 
 
 def evaluate(actor, env, current_timestep, max_steps, path=None):
+    env.training = True
+
     eval_data = evaluate_policy(actor, env, num_episodes=10, max_steps=max_steps)
 
     mean_r = np.mean(eval_data["episode_rewards"])
@@ -39,6 +41,8 @@ def evaluate(actor, env, current_timestep, max_steps, path=None):
         "eval_mean_return": mean_r,
         # "eval_std_return": std_r,
     }, step=current_timestep)
+
+    env.training = False
 
     return current_timestep, mean_r, std_r
 

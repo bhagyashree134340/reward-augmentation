@@ -8,6 +8,12 @@ from pathlib import Path
 import re
 import wandb
 import gymnasium as gym
+import gymnasium_robotics
+from gymnasium.wrappers import TimeLimit
+
+from utils.env_wrapper import make_env
+
+gym.register_envs(gymnasium_robotics)
 from hydra.core.hydra_config import HydraConfig
 
 from networks.network import Actor
@@ -26,7 +32,7 @@ def load_actor(actor_path, actor_class, obs_dim, act_dim, act_low, act_high):
 
 
 # TODO:make this config as conf-evaluate
-@hydra.main(config_path="conf", config_name="config", version_base=None)
+# @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main():
     wandb.init(
         project="sac-reward-aug-evaluate",
@@ -34,12 +40,16 @@ def main():
     )
 
     # TODO: will go in a config
-    actor_path = "outputs/2025-05-21/23-34-41/checkpoints/sac_actor_step299000.pt"
+    actor_path = "outputs/2025-06-09/09-51-28-sac_agent-FetchReachDense-v3-True/checkpoints/sac_actor_step300000.pt"
 
     max_steps = 1000
 
     # TODO: put it in a make_env()
-    env = gym.make("LunarLanderContinuous-v3", continuous=True, gravity=-10.0, render_mode="rgb_array")
+    env = make_env(
+        env_name="FetchReachDense-v3",
+        render_mode="rgb_array",
+        max_episode_steps=100,
+    )
 
     actor = load_actor(actor_path, Actor,
                        env.observation_space.shape[0],

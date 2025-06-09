@@ -8,6 +8,7 @@ from CFN.priority_util import compute_cfn_priority
 
 class CFNReplayBufferWrapper:
     def __init__(self, size, obs_shape, coin_flip_dim, alpha=0.5):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.buffer = PrioritizedReplayBuffer(
             size,
@@ -43,8 +44,8 @@ class CFNReplayBufferWrapper:
         indices = sample["indexes"]
 
         # Get tensors
-        obs_batch = torch.tensor(sample["obs"], dtype=torch.float32)
-        coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32)
+        obs_batch = torch.tensor(sample["obs"], dtype=torch.float32, device=self.device)
+        coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32, device=self.device)
 
         if use_cfn_priority:
             for idx in indices:

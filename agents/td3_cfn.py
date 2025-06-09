@@ -98,9 +98,11 @@ class QNetwork(nn.Module):
 
 class TD3CFNAgent(TD3Agent):
     def __init__(self, env, cfn_cfg, learning_rate=3e-4, buffer_size=int(1e6), gamma=0.99, tau=0.005, batch_size=256,
-                 exploration_noise=0.1, learning_starts=25e3, policy_frequency=2, noise_clip=0.5, **kwargs):
+                 exploration_noise=0.1, learning_starts=25e3, policy_frequency=2, noise_clip=0.5, eval_env=None,
+                 **kwargs):
         super().__init__(
             env=env,
+            eval_env=eval_env,
             learning_rate=learning_rate,
             buffer_size=buffer_size,
             gamma=gamma,
@@ -113,6 +115,7 @@ class TD3CFNAgent(TD3Agent):
             **kwargs
         )
         self.env = env
+        self.eval_env = eval_env
         self.gamma = gamma
         self.tau = tau
         self.batch_size = batch_size
@@ -202,14 +205,18 @@ class TD3CFNAgent(TD3Agent):
                 self.cfn.compute_squared_output_norm(torch.as_tensor(obs).float())
             )
 
-            intrinsic_reward *= 0.05
-
             if self.use_cfn_prior:
                 self.cfn(torch.as_tensor(obs).float(), update_prior_stats=True)
 
             # TRY NOT TO MODIFY: record rewards for plotting purposes
             episode_reward += rewards + intrinsic_reward
             episode_length += 1
+
+            if global_step % 1000 == 0:
+                wandb.log({
+                    "ext_reward": rewards,
+                    "int_reward": intrinsic_reward,
+                })
 
             # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
             real_next_obs = next_obs.copy()
@@ -228,6 +235,7 @@ class TD3CFNAgent(TD3Agent):
 
             # Store in CFN buffer
             coin_flip = get_coin_flips(self.coin_flip_dim)
+
             self.cfn_buffer.add(
                 obs=np.array(obs, dtype=np.float32),
                 coin_flip=coin_flip.detach().numpy(),
@@ -293,7 +301,7 @@ class TD3CFNAgent(TD3Agent):
                         for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
                             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
-                        if global_step % 100 == 0:
+                        if global_step % 1000 == 0:
                             wandb.log({
                                 "losses/qf1_loss": qf1_loss.item(),
                                 "losses/qf2_loss": qf2_loss.item(),
@@ -321,8 +329,6 @@ class TD3CFNAgent(TD3Agent):
                     "charts/episodic_return": episode_reward,
                     "charts/episodic_length": episode_length,
                     "charts/episode_num": episode_num,
-                    "ext_reward": rewards,
-                    "int_reward": intrinsic_reward,
                 }, step=global_step)
 
                 log.info(
@@ -339,7 +345,7 @@ class TD3CFNAgent(TD3Agent):
             # Evaluation
             if global_step % 1000 == 0:
                 validate(self.actor, global_step)
-                self.evaluate(self.actor, self.env, total_timesteps)
+                evaluate(self.actor, self.eval_env, current_timestep=global_step, max_steps=max_episode_steps)
 
         # Final evaluation and plotting
         stats = EpisodeStats(
@@ -348,22 +354,22 @@ class TD3CFNAgent(TD3Agent):
             timesteps_on_ep_end=timesteps_on_ep_end
         )
 
-        # plot_and_save_training_metrics(
-        #     stats,
-        #     output_dir=Path(HydraConfig.get().runtime.output_dir),
-        #     tag="td3_run"
-        # )
+        plot_and_save_training_metrics(
+            stats,
+            output_dir=Path(HydraConfig.get().runtime.output_dir),
+            tag="td3_run"
+        )
 
-        # plot_path = Path(HydraConfig.get().runtime.output_dir) / "validate" / f"eval_plot_step{total_timesteps}.png"
-        # plot_eval_curve(self.eval_envsteps, self.eval_means, self.eval_stds, plot_path)
-        #
-        # save_rollout_gif(self.actor, self.env, Path(
-        #     HydraConfig.get().runtime.output_dir) / "validate" / f"eval_gif{total_timesteps}.gif")
-        #
-        # cfn_early_vs_late_training_comparison(self.cfn,
-        #                                       eval_dir=Path(HydraConfig.get().runtime.output_dir) / "evaluate")
-        #
-        # evaluate_cfn_bonus_generalization(self.cfn, self.env, self.buffer)
+        plot_path = Path(HydraConfig.get().runtime.output_dir) / "validate" / f"eval_plot_step{total_timesteps}.png"
+        plot_eval_curve(self.eval_envsteps, self.eval_means, self.eval_stds, plot_path)
+
+        save_rollout_gif(self.actor, self.env, Path(
+            HydraConfig.get().runtime.output_dir) / "validate" / f"eval_gif{total_timesteps}.gif")
+
+        cfn_early_vs_late_training_comparison(self.cfn,
+                                              eval_dir=Path(HydraConfig.get().runtime.output_dir) / "evaluate")
+
+        evaluate_cfn_bonus_generalization(self.cfn, self.env, self.buffer)
 
     def update_cfn(self, obs_batch: torch.Tensor, coin_flip_batch: torch.Tensor):
         """

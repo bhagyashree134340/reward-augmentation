@@ -24,15 +24,15 @@ log = logging.getLogger(__name__)
 
 
 class SACCFNAgent(SACAgent):
-    def __init__(self, env, eval_env, cfn_cfg, **kwargs):
-        super().__init__(env, eval_env, **kwargs)
+    def __init__(self, env, cfn_cfg, **kwargs):
+        super().__init__(env, **kwargs)
 
         self.cfn_cfg = cfn_cfg
         self.use_cfn_prior = cfn_cfg.use_cfn_prior
         self.use_cfn_priority = cfn_cfg.use_cfn_priority
         self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
 
-        self.cfn = CoinFlipNetwork(env.observation_space.shape[0], self.coin_flip_dim)
+        self.cfn = CoinFlipNetwork(env.observation_space.shape[0], self.coin_flip_dim).to(self.device)
         self.cfn_optimizer = optim.Adam(self.cfn.parameters(), lr=self.cfn_cfg.cfn_lr)
 
         self.cfn_buffer = CFNReplayBufferWrapper(
@@ -44,53 +44,7 @@ class SACCFNAgent(SACAgent):
 
         self.is_goal_env = hasattr(env, 'is_goal_env') and env.is_goal_env
 
-        # if self.is_goal_env:
-        #     # Get dimensions from the original environment
-        #     obs_space = env.env.observation_space['observation']
-        #     goal_space = env.env.observation_space['desired_goal']
-        #     action_space = env.action_space
-        #
-        #     # Replace regular buffer with HER buffer
-        #     self.buffer = HindsightReplayBuffer(
-        #         size=16384,
-        #         max_episode_len=500000,
-        #         env_dict={
-        #             "obs": {"shape": obs_space.shape},
-        #             "act": {"shape": action_space.shape},
-        #             "ext_rew": {},
-        #             "int_rew": {},
-        #             "next_obs": {"shape": obs_space.shape},
-        #             "done": {},
-        #             "achieved_goal": {"shape": goal_space.shape},
-        #             "desired_goal": {"shape": goal_space.shape}
-        #         },
-        #         goal_func=self._goal_func,
-        #         reward_func=self._reward_func,
-        #         her_strategy="future",
-        #         her_ratio=0.8
-        #     )
-        #     log.info("Using HER buffer for goal-conditioned environment")
-        # else:
-        #     log.warning("Environment is not goal-conditioned, using regular buffer")
-
-    # def _goal_func(self, episode):
-    #     """Extract achieved goals from episode for HER"""
-    #     return episode["achieved_goal"]
-    #
-    # def _reward_func(self, achieved_goal, desired_goal, info):
-    #     """Compute reward for HER relabeling"""
-    #     # Use the environment's reward function
-    #     return self.env.env.compute_reward(achieved_goal, desired_goal, info)
-    #
-    # def _get_obs_dict(self):
-    #     """Get observation dictionary from the unwrapped environment"""
-    #     env = self.env
-    #     # Unwrap until we find the actual Fetch environment
-    #     while hasattr(env, 'env'):
-    #         env = env.env
-    #     return env._get_obs()
-
-    def train(self, total_timesteps, max_steps, learning_starts=5000):
+    def train(self, total_timesteps, max_episode_steps, learning_starts=5000):
         current_timestep = 0
         episode_return = 0
         episode_step = 0
@@ -104,7 +58,7 @@ class SACCFNAgent(SACAgent):
 
         while current_timestep < total_timesteps:
             with torch.no_grad():
-                action, _ = self.actor(torch.as_tensor(obs).float())
+                action, _ = self.actor(torch.as_tensor(obs).float().to(self.device))
                 action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
 
             next_obs, reward, terminated, truncated, info = self.env.step(action)
@@ -113,36 +67,19 @@ class SACCFNAgent(SACAgent):
 
             intrinsic_reward = compute_intrinsic_reward(
                 self.coin_flip_dim,
-                self.cfn.compute_squared_output_norm(torch.as_tensor(obs).float())
+                self.cfn.compute_squared_output_norm(torch.as_tensor(obs).float().to(self.device))
             )
 
             if self.use_cfn_prior:
-                self.cfn(torch.as_tensor(obs).float(), update_prior_stats=True)
+                self.cfn(torch.as_tensor(obs).float().to(self.device), update_prior_stats=True)
 
             if current_timestep%1000 == 0:
                 wandb.log({
                     "ext_reward": reward,
                     "int_reward": intrinsic_reward,
                     # "int rew / total rew": intrinsic_reward/(reward+intrinsic_reward)
-                })
+                }, step=current_timestep)
 
-            # if self.is_goal_env:
-            #     # Get the current observation dict from the unwrapped environment
-            #     current_obs_dict = self._get_obs_dict()
-            #
-            #     # Store with goal information for HER
-            #     self.buffer.add(
-            #         obs=current_obs_dict['observation'].astype(np.float32),
-            #         act=np.array(action, dtype=np.float32),
-            #         ext_rew=np.array(reward, dtype=np.float32),
-            #         int_rew=np.array(intrinsic_reward, dtype=np.float32),
-            #         next_obs=current_obs_dict['observation'].astype(np.float32),  # Will be updated next step
-            #         done=np.array(done, dtype=np.float32),
-            #         achieved_goal=current_obs_dict['achieved_goal'].astype(np.float32),
-            #         desired_goal=current_obs_dict['desired_goal'].astype(np.float32)
-            #     )
-            # else:
-            # Regular buffer storage for non-goal environments
             self.buffer.add(
                 obs=np.array(obs, dtype=np.float32),
                 act=np.array(action, dtype=np.float32),
@@ -166,26 +103,15 @@ class SACCFNAgent(SACAgent):
                 # if self.buffer.get_stored_size() >= self.batch_size:
                 sample = self.buffer.sample(self.batch_size)
 
-                # if self.is_goal_env:
-                #     # For goal environments, concatenate obs with desired_goal for policy input
-                #     obs_batch = torch.tensor(
-                #         np.concatenate([sample["obs"], sample["desired_goal"]], axis=1),
-                #         dtype=torch.float32
-                #     )
-                #     next_obs_batch = torch.tensor(
-                #         np.concatenate([sample["next_obs"], sample["desired_goal"]], axis=1),
-                #         dtype=torch.float32
-                #     )
-                # else:
-                obs_batch = torch.tensor(sample["obs"], dtype=torch.float32)
-                next_obs_batch = torch.tensor(sample["next_obs"], dtype=torch.float32)
+                obs_batch = torch.tensor(sample["obs"], dtype=torch.float32).to(self.device)
+                next_obs_batch = torch.tensor(sample["next_obs"], dtype=torch.float32).to(self.device)
 
-                act_batch = torch.tensor(sample["act"], dtype=torch.float32)
-                ext_rew_batch = torch.tensor(sample["ext_rew"], dtype=torch.float32).squeeze(-1)
-                int_rew_batch = torch.tensor(sample["int_rew"], dtype=torch.float32).squeeze(-1)
-                tm_batch = torch.tensor(sample["done"], dtype=torch.float32).squeeze(-1)
+                act_batch = torch.tensor(sample["act"], dtype=torch.float32).to(self.device)
+                ext_rew_batch = torch.tensor(sample["ext_rew"], dtype=torch.float32).squeeze(-1).to(self.device)
+                int_rew_batch = torch.tensor(sample["int_rew"], dtype=torch.float32).squeeze(-1).to(self.device)
+                tm_batch = torch.tensor(sample["done"], dtype=torch.float32).squeeze(-1).to(self.device)
 
-                total_rew_batch = ext_rew_batch + int_rew_batch
+                total_rew_batch = torch.clamp(int_rew_batch + ext_rew_batch, min=-1.0, max=1.0)
 
                 self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, tm_batch, current_timestep)
 
@@ -205,15 +131,15 @@ class SACCFNAgent(SACAgent):
             episode_step += 1
             current_timestep += 1
 
-            if done or episode_step >= max_steps:
+            if done or episode_step >= max_episode_steps:
                 episode_lengths.append(episode_step)
                 episode_rewards.append(episode_return)
                 timesteps_on_ep_end.append(current_timestep)
 
                 wandb.log({
-                    "episode return": episode_return,
-                    "episode length": episode_step,
-                    "episode num": episode_num
+                    "charts/episodic_return": episode_return,
+                    "charts/episodic_length": episode_step,
+                    "charts/episode_num": episode_num
                     # "intrinsic rewards": intrinsic_reward,
                     # "reward": reward
                 }, step=current_timestep)
@@ -232,7 +158,7 @@ class SACCFNAgent(SACAgent):
             if current_timestep % 1000 == 0:
                 validate(self.actor, current_timestep)
 
-                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_steps)
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_episode_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)

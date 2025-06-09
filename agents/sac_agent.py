@@ -43,13 +43,17 @@ class SACAgent:
         :param max_size: Maximum number of transitions in the buffer.
         """
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.eval_envsteps, self.eval_means, self.eval_stds = [], [], []
         self.env = env
         self.eval_env = eval_env
         self.gamma = gamma
         self.batch_size = batch_size
         self.tau = tau
-        self.target_entropy = -np.prod(env.action_space.shape).item()
+        self.target_entropy = -np.prod(env.action_space.shape).item()  #target_entropy  # -np.prod(
+        # env.action_space.shape).item()
+        # self.target_entropy = -2
 
         # Initialize the Replay Buffer
         # self.buffer = ReplayBuffer(maxlen)
@@ -66,16 +70,16 @@ class SACAgent:
         )
 
         # Initialize two critic and one actor network
-        self.q1 = Critic(env.observation_space.shape[0], env.action_space.shape[0])
-        self.q2 = Critic(env.observation_space.shape[0], env.action_space.shape[0])
+        self.q1 = Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(self.device)
+        self.q2 = Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(self.device)
         self.actor = Actor(env.observation_space.shape[0], env.action_space.shape[0], env.action_space.low,
-                           env.action_space.high)
-        self.log_ent_coef = torch.zeros(1, requires_grad=True)
+                           env.action_space.high).to(self.device)
+        self.log_ent_coef = torch.zeros(1, requires_grad=True, device=self.device)
 
         # Initialze two target critic and one target actor networks and load the corresponding state_dicts
-        self.q1_target = copy.deepcopy(self.q1)
-        self.q2_target = copy.deepcopy(self.q2)
-        self.actor_target = copy.deepcopy(self.actor)
+        self.q1_target = copy.deepcopy(self.q1).to(self.device)
+        self.q2_target = copy.deepcopy(self.q2).to(self.device)
+        self.actor_target = copy.deepcopy(self.actor).to(self.device)
 
         self.q1_target.load_state_dict(self.q1.state_dict())
         self.q2_target.load_state_dict(self.q2.state_dict())
@@ -85,9 +89,9 @@ class SACAgent:
         self.q1_optimizer = optim.Adam(self.q1.parameters(), lr=lr)
         self.q2_optimizer = optim.Adam(self.q2.parameters(), lr=lr)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
-        self.ent_coef_optimizer = optim.Adam([self.log_ent_coef], lr=lr)
+        self.ent_coef_optimizer = optim.Adam([self.log_ent_coef], lr=lr*0.1)
 
-    def train(self, total_timesteps: int, max_steps: int) -> None:
+    def train(self, total_timesteps: int, max_episode_steps: int) -> None:
         """
         Train the SAC agent using a timestep-based loop.
 
@@ -108,7 +112,7 @@ class SACAgent:
             # self.cfn.prior.train()
             # Select action
             with torch.no_grad():
-                action, _ = self.actor(torch.as_tensor(obs).float())
+                action, _ = self.actor(torch.as_tensor(obs, device=self.device).float())
                 action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
 
             next_obs, reward, terminated, truncated, _ = self.env.step(action)
@@ -117,7 +121,7 @@ class SACAgent:
 
             wandb.log({
                 "ext_reward": reward
-            })
+            }, step=current_timestep)
 
             self.buffer.add(
                 obs=np.array(obs, dtype=np.float32),
@@ -134,29 +138,29 @@ class SACAgent:
 
                 sample = self.buffer.sample(self.batch_size)
 
-                obs_batch = torch.tensor(sample["obs"], dtype=torch.float32)
-                act_batch = torch.tensor(sample["act"], dtype=torch.float32)
-                ext_rew_batch = torch.tensor(sample["ext_rew"], dtype=torch.float32).squeeze(-1)
-                # int_rew_batch = torch.tensor(sample["int_rew"], dtype=torch.float32).squeeze(-1)
-                next_obs_batch = torch.tensor(sample["next_obs"], dtype=torch.float32)
-                tm_batch = torch.tensor(sample["done"], dtype=torch.float32).squeeze(-1)
+                obs_batch = torch.tensor(sample["obs"], dtype=torch.float32, device=self.device)
+                act_batch = torch.tensor(sample["act"], dtype=torch.float32, device=self.device)
+                ext_rew_batch = torch.tensor(sample["ext_rew"], dtype=torch.float32, device=self.device).squeeze(-1)
+                next_obs_batch = torch.tensor(sample["next_obs"], dtype=torch.float32, device=self.device)
+                tm_batch = torch.tensor(sample["done"], dtype=torch.float32, device=self.device).squeeze(-1)
 
-                self.update(obs_batch, act_batch, ext_rew_batch, next_obs_batch, tm_batch)
+                self.update(obs_batch, act_batch, ext_rew_batch, next_obs_batch, tm_batch,
+                            current_step=current_timestep)
 
             obs = next_obs
             episode_return += reward
             episode_step += 1
             current_timestep += 1
 
-            if done or episode_step >= max_steps:
+            if done or episode_step >= max_episode_steps:
                 episode_lengths.append(episode_step)
                 episode_rewards.append(episode_return)
                 timesteps_on_ep_end.append(current_timestep)
 
                 wandb.log({
-                    "episode return": episode_return,
-                    "episode length": episode_step,
-                    "episode num": episode_num
+                    "charts/episodic_return": episode_return,
+                    "charts/episodic_length": episode_step,
+                    "charts/episode_num": episode_num
                     # "intrinsic rewards": intrinsic_reward,
                     # "reward": reward
                 }, step=current_timestep)
@@ -175,7 +179,7 @@ class SACAgent:
             if current_timestep % 1000 == 0:
                 validate(self.actor, current_timestep)
 
-                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.env, current_timestep, max_steps)
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_episode_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)
@@ -197,7 +201,7 @@ class SACAgent:
             HydraConfig.get().runtime.output_dir) / "validate" / f"eval_plot_step{current_timestep}.png"
         plot_eval_curve(self.eval_envsteps, self.eval_means, self.eval_stds, plot_path)
 
-        save_rollout_gif(self.actor, self.env,  Path(
+        save_rollout_gif(self.actor, self.env, Path(
             HydraConfig.get().runtime.output_dir) / "validate" / f"eval_gif{current_timestep}.gif")
 
     def update(
@@ -217,6 +221,7 @@ class SACAgent:
         rew_batch = rew_batch.unsqueeze(-1)
         not_done = 1 - tm_batch.unsqueeze(-1).float()
         ent_coef = self.log_ent_coef.exp()
+        # ent_coef = 0.05
 
         # Compute target for critics
         with torch.no_grad():
@@ -252,7 +257,7 @@ class SACAgent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        # Update entropy coefficient
+        # # Update entropy coefficient
         ent_coef_loss = -(self.log_ent_coef.exp() * (new_log_prob.detach() + self.target_entropy)).mean()
 
         self.ent_coef_optimizer.zero_grad()
@@ -265,15 +270,13 @@ class SACAgent:
         polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
 
         # TODO: Add current time step
-        # wandb.log({
-        #     "loss/q1_loss": q_losses[0],
-        #     "loss/q2_loss": q_losses[1],
-        #     "loss/actor_loss": actor_loss.item(),
-        #     "loss/ent_coef_loss": ent_coef_loss.item(),
-        #     "policy/entropy": -new_log_prob.mean().item(),
-        #     "q_values/q1_mean": q1_new.mean().item(),
-        #     "q_values/q2_mean": q2_new.mean().item(),
-        #     "ent_coef/value": ent_coef.item(),
-        # }, step=current_step)
-
-
+        wandb.log({
+            "loss/q1_loss": q_losses[0],
+            "loss/q2_loss": q_losses[1],
+            "loss/actor_loss": actor_loss.item(),
+            "loss/ent_coef_loss": ent_coef_loss.item(),
+            "policy/entropy": -new_log_prob.mean().item(),
+            "q_values/q1_mean": q1_new.mean().item(),
+            "q_values/q2_mean": q2_new.mean().item(),
+            "ent_coef/value": ent_coef.item(),
+        }, step=current_step)

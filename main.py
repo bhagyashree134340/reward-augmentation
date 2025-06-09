@@ -17,46 +17,70 @@ log = logging.getLogger(__name__)
 
 
 def create_agent(cfg: DictConfig, env):
-    agent_type = cfg.agent.id.lower()
+    agent_id = cfg.agent.id.lower()
+    use_cfn = cfg.agent.cfn
+    eval_env = make_env(cfg.env.id,
+                        render_mode=cfg.env.render_mode,
+                        max_episode_steps=cfg.env.max_episode_steps)
 
-    agent_classes = {
-        "sac": SACAgent,
-        "sac_cfn": SACCFNAgent,
-        "td3": TD3Agent,
-        "td3_cfn": TD3CFNAgent,
-    }
+    if agent_id == "sac_agent":
+        if use_cfn:
+            agent = SACCFNAgent(
+                env=env,
+                lr=cfg.agent.lr,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                maxlen=cfg.agent.replay_buffer_size,
+                target_entropy=cfg.agent.target_entropy,
+                cfn_cfg=cfg.cfn,
+                eval_env=eval_env
+            )
+        else:
+            agent = SACAgent(
+                env=env,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                maxlen=cfg.agent.replay_buffer_size,
+                target_entropy=cfg.agent.target_entropy,
+                eval_env=eval_env
+            )
 
-    if agent_type not in agent_classes:
-        raise ValueError(f"Unsupported agent type: {agent_type}")
+    elif agent_id == "td3_agent":
+        if use_cfn:
+            agent = TD3CFNAgent(
+                env=env,
+                cfn_cfg=cfg.cfn,
+                learning_rate=cfg.agent.lr,
+                buffer_size=cfg.agent.buffer_size,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                exploration_noise=cfg.agent.exploration_noise,
+                learning_starts=cfg.agent.learning_starts,
+                policy_frequency=cfg.agent.policy_frequency,
+                noise_clip=cfg.agent.noise_clip,
+                eval_env=eval_env
+            )
+        else:
+            agent = TD3Agent(
+                env=env,
+                learning_rate=cfg.agent.lr,
+                buffer_size=cfg.agent.buffer_size,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                exploration_noise=cfg.agent.exploration_noise,
+                learning_starts=cfg.agent.learning_starts,
+                policy_frequency=cfg.agent.policy_frequency,
+                noise_clip=cfg.agent.noise_clip,
+            )
 
-    agent_cls = agent_classes[agent_type]
-    agent_args = {
-        "env": env,
-        "learning_rate": cfg.agent.lr,
-        "gamma": cfg.agent.discount_factor,
-        "tau": cfg.agent.tau,
-        "batch_size": cfg.agent.batch_size,
-    }
+    else:
+        raise ValueError(f"Unsupported agent id: {agent_id}")
 
-    if "sac" in agent_type:
-        agent_args.update({
-            "maxlen": cfg.agent.replay_buffer_size,
-            "target_entropy": cfg.agent.target_entropy,
-        })
-
-    if "cfn" in agent_type:
-        agent_args["cfn_cfg"] = cfg.cfn
-
-    if agent_type.startswith("td3"):
-        agent_args.update({
-            "exploration_noise": cfg.agent.exploration_noise,
-            "learning_starts": cfg.agent.learning_starts,
-            "policy_noise": cfg.agent.policy_noise,
-            "noise_clip": cfg.agent.noise_clip,
-            "policy_delay": cfg.agent.policy_delay,
-        })
-
-    return agent_cls(**agent_args)
+    return agent
 
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
@@ -77,48 +101,18 @@ def main(cfg: DictConfig):
         reinit=True
     )
 
-    # Environment creation
+    # Create environment(s)
     env = make_env(cfg.env.id,
                    render_mode=cfg.env.render_mode,
-                   max_episode_steps=cfg.env.max_episode_steps
-                   )
-    eval_env = make_env(
-                        cfg.env.id,
-                        render_mode=cfg.env.render_mode,
-                        max_episode_steps=cfg.env.max_episode_steps
-                        )
+                   max_episode_steps=cfg.env.max_episode_steps)
 
-    # Agent creation
-    if cfg.agent.cfn:
-        agent = SACCFNAgent(
-            env,
-            eval_env,
-            gamma=cfg.agent.discount_factor,
-            lr=cfg.agent.lr,
-            batch_size=cfg.agent.batch_size,
-            tau=cfg.agent.tau,
-            maxlen=cfg.agent.replay_buffer_size,
-            target_entropy=cfg.agent.target_entropy,
-            cfn_cfg=cfg.cfn if cfg.cfn.get("enabled") else None
-        )
-    else:
-        agent = SACAgent(
-            env,
-            eval_env,
-            gamma=cfg.agent.discount_factor,
-            lr=cfg.agent.lr,
-            batch_size=cfg.agent.batch_size,
-            tau=cfg.agent.tau,
-            maxlen=cfg.agent.replay_buffer_size,
-            target_entropy=cfg.agent.target_entropy,
-        )
+    agent = create_agent(cfg, env)
 
-    # Start training
-    # log.info(f"Starting training with {cfg.agent.id.upper()} on {cfg.env.id}")
+    # Train the agent
     start_time = time.time()
     agent.train(
         total_timesteps=cfg.agent.num_env_steps,
-        max_steps=cfg.env.max_episode_steps
+        max_episode_steps=cfg.env.max_episode_steps
     )
     elapsed = time.time() - start_time
     h, rem = divmod(elapsed, 3600)

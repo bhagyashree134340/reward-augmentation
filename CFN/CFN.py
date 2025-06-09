@@ -5,6 +5,8 @@ import torch.nn as nn
 class CoinFlipNetwork(nn.Module):
     def __init__(self, state_dim, coin_dim, hidden_dim=128):
         super().__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
@@ -27,17 +29,12 @@ class CoinFlipNetwork(nn.Module):
         # Running statistics to normalize prior output acc to the paper: E[‖f_prior(s)‖²] = 1
         self.register_buffer("prior_squared_norm_mean", torch.tensor(1.0))
         self.register_buffer("prior_squared_norm_count", torch.tensor(1e-4))
+        self.to(self.device)
 
     def forward(self, state, update_prior_stats=False):
-        """
-
-        :param state:
-        :param update_prior_stats:
-        :return:
-        """
+        state = state.to(self.device)
         with torch.no_grad():
             prior_out = self.prior(state)
-
             if update_prior_stats:
                 self.update_prior_stats(prior_out)
 
@@ -47,9 +44,7 @@ class CoinFlipNetwork(nn.Module):
         return self.net(state) + normalized_prior
 
     def compute_squared_output_norm(self, obs):
-        """
-        Compute the squared L2 norm (‖fϕ(s)‖²) of the network's output.
-        """
+        obs = obs.to(self.device)
         with torch.no_grad():
             output = self.forward(obs, update_prior_stats=False)
             return torch.norm(output, p=2, dim=-1) ** 2

@@ -1,5 +1,6 @@
 import imageio
 import numpy as np
+import wandb
 from PIL import Image
 import torch
 import logging
@@ -10,7 +11,11 @@ log = logging.getLogger(__name__)
 def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
     """
     Evaluates the policy over a number of episodes and stores data similar to SB3's EvalCallback.
+    Handles both SAC (returns (action, extra)) and TD3 (returns action only).
     """
+    import torch
+    import numpy as np
+
     actor.eval()
 
     all_obs = []
@@ -32,8 +37,15 @@ def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
             all_obs.append(obs)
 
             with torch.no_grad():
-                action, _ = actor(torch.as_tensor(obs).float())
-                action = action.cpu().numpy().clip(env.action_space.low, env.action_space.high)
+                obs_tensor = torch.as_tensor(obs).float().unsqueeze(0)
+                output = actor(obs_tensor)
+                if isinstance(output, tuple):
+                    action = output[0]
+                else:
+                    action = output
+                action = action.cpu().numpy()[0]
+                action = np.clip(action, env.action_space.low, env.action_space.high)
+
             all_actions.append(action)
 
             obs, reward, terminated, truncated, _ = env.step(action)
@@ -80,12 +92,12 @@ def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
 
         try:
             cam = base_env.mujoco_renderer.viewer.cam
-            cam.distance = 5
-            cam.lookat[:] = [1.3, 0.75, 0.5]
+            cam.distance = 4
+            cam.lookat[:] = [0.5, 0.5, 0.5]
             cam.azimuth = 180
-            cam.elevation = -20
+            cam.elevation = -90
         except Exception as e:
-            log.info("Failed to adjust Fetch camera settings:", e)
+            print("Failed to adjust Fetch camera settings:", e)
 
     while not done and step < max_episode_steps:
         frame = env.render()
@@ -97,7 +109,9 @@ def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
         ).unsqueeze(0)
 
         with torch.no_grad():
-            action, _ = actor(obs_tensor)
+            result = actor(obs_tensor)
+            # TD3 returns only action, SAC returns (action, log_prob)
+            action = result[0] if isinstance(result, tuple) else result
             action = action.cpu().numpy()[0]
 
         obs, reward, terminated, truncated, _ = env.step(action)
@@ -106,3 +120,4 @@ def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
 
     actor.train()
     imageio.mimsave(gif_path, frames, fps=30)
+    # wandb.log({"evaluation/rollout": wandb.Video(str(gif_path), fps=30, format="gif")})
