@@ -119,9 +119,10 @@ class SACAgent:
 
             done = terminated or truncated
 
-            wandb.log({
-                "ext_reward": reward
-            }, step=current_timestep)
+            # if current_timestep % 1000 == 0:
+            #     wandb.log({
+            #         "ext_reward": reward
+            #     }, step=current_timestep)
 
             self.buffer.add(
                 obs=np.array(obs, dtype=np.float32),

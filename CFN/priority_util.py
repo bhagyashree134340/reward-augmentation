@@ -5,38 +5,53 @@ import numpy as np
 from torch import Tensor
 
 
-def compute_cfn_priority(cfn, obs_batch, update_counts, coin_flip_dim, alpha=0.5):
+def compute_cfn_priority(cfn, obs_batch: Tensor, update_counts: Tensor, coin_flip_dim: int, alpha=0.5, device=None) -> Tensor:
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    obs_batch = obs_batch.to(device)
+    update_counts = update_counts.to(device)
+
     norms = cfn.compute_squared_output_norm(obs_batch)
     scaled_norms = norms / coin_flip_dim
-    # TODO: cant i add like 0.001 instead of 1.0 to avoid dividing by 0?
-    one_over_counts = 1.0 / (update_counts + 1.0)
-    priorities = alpha * one_over_counts + (1 - alpha) * scaled_norms
 
+    # Add a small epsilon to avoid division by zero (better than 1.0)
+    epsilon = 1e-3
+    one_over_counts = 1.0 / (update_counts + epsilon)
+
+    one_over_counts = one_over_counts.to(device)
+
+    priorities = alpha * one_over_counts + (1 - alpha) * scaled_norms
     return priorities
 
 
-def get_coin_flips(coin_flip_dim) -> torch.Tensor:
+def get_coin_flips(coin_flip_dim: int, device=None) -> torch.Tensor:
     """
-    function to get the actual coin flip vectors.
+    Generate a random coin flip vector with values -1 or 1.
 
-    :param coin_flip_dim:
-    :return: The random coin flip vectors.
+    Args:
+        coin_flip_dim (int): Dimensionality of the coin flip vector.
+        device (torch.device): Device to place the tensor on.
+
+    Returns:
+        torch.Tensor: Random coin flip vector of shape (coin_flip_dim,)
     """
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     coin_flips = np.random.choice([-1, 1], size=coin_flip_dim)
-    return torch.from_numpy(coin_flips).float()
+    return torch.from_numpy(coin_flips).float().to(device)
 
 
-def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: torch.Tensor) -> Tensor:
+def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: Tensor, device=None) -> Tensor:
     """
     Computes intrinsic reward using coin-flip vector dimensionality and its norm.
 
     Args:
         coin_flip_d (int): Dimensionality of the coin-flip vector.
-        cfn_norm (float): Precomputed squared L2 norm of the vector.
+        cfn_norm (Tensor): Precomputed squared L2 norm of the vector.
 
     Returns:
-        float: Intrinsic reward value.
-"""
-    # torch.sqrt(cfn_squared_norms / coin_flip_d)? i dont think it's necessary
-    return torch.sqrt(cfn_norm / coin_flip_d)
+        Tensor: Intrinsic reward value.
+    """
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    return torch.sqrt(cfn_norm / coin_flip_d).to(device)

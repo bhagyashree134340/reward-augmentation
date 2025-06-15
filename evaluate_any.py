@@ -1,3 +1,5 @@
+import os
+os.environ["MUJOCO_GL"] = "egl" 
 import logging
 
 import hydra
@@ -34,19 +36,20 @@ def load_actor(actor_path, actor_class, obs_dim, act_dim, act_low, act_high):
 # TODO:make this config as conf-evaluate
 # @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     wandb.init(
         project="sac-reward-aug-evaluate",
         reinit=True
     )
 
     # TODO: will go in a config
-    actor_path = "outputs/2025-06-09/09-51-28-sac_agent-FetchReachDense-v3-True/checkpoints/sac_actor_step300000.pt"
-
+    actor_path = "/home/raneb/project/reward-augmentation/outputs/2025-06-14/08-47-26-sac_agent-FetchPushDense-v4-True/checkpoints/sac_actor_step1000000.pt"
     max_steps = 1000
 
     # TODO: put it in a make_env()
     env = make_env(
-        env_name="FetchReachDense-v3",
+        env_name="FetchPushDense-v4",
         render_mode="rgb_array",
         max_episode_steps=100,
     )
@@ -56,6 +59,8 @@ def main():
                        env.action_space.shape[0],
                        env.action_space.low,
                        env.action_space.high)
+    
+    actor = actor.to(device)
 
     # TODO: add an output dir param
     _, mean_r, std_r = evaluate(actor, env, 0, max_steps, "evaluate_any_outputs")
@@ -63,7 +68,8 @@ def main():
     log.info(f"mean return: {mean_r} ± {std_r}")
 
     #     TODO: add plots and gifs
-    save_rollout_gif(actor, env, "evaluate_any_outputs/eval_gif.gif")
+    for i in range(5):
+        save_rollout_gif(actor, env, f"evaluate_any_outputs/eval_gif_{i}.gif")
 
 
 if __name__ == "__main__":

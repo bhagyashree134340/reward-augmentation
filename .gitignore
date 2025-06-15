@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+.env/
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+
+# Actor checkpoints
+*.pt
+*.npz
+*.gif
+*.png
+*.yaml
+*.json
+*.wandb
+wandb
+log

@@ -15,7 +15,6 @@ class CFNReplayBufferWrapper:
             env_dict={
                 "obs": {"shape": obs_shape, "dtype": np.float32},
                 "coin_flip": {"shape": (coin_flip_dim,), "dtype": np.float32},
-                # "update_count": {"shape": (), "dtype": np.float32},
             }
         )
 

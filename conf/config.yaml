@@ -1,5 +1,5 @@
 defaults:
-  - agent: td3_agent #sac_agent #td3_agent
+  - agent: sac_agent #sac_agent #td3_agent
   - env: fetch
   - cfn: cfn
 

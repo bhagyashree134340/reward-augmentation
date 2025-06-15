@@ -21,8 +21,10 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 
 
-def evaluate(actor, env, current_timestep, max_steps, path=None):
-    env.training = True
+def evaluate(actor, env, current_timestep, max_steps, path=None, device=None):
+    env.training = False
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
     eval_data = evaluate_policy(actor, env, num_episodes=10, max_steps=max_steps)
 
@@ -42,7 +44,7 @@ def evaluate(actor, env, current_timestep, max_steps, path=None):
         # "eval_std_return": std_r,
     }, step=current_timestep)
 
-    env.training = False
+    env.training = True
 
     return current_timestep, mean_r, std_r
 
@@ -82,7 +84,7 @@ def load_rollout_stats(validate_dir):
 #     plot_validation_stats(timesteps, returns, lengths, output_dir / "final_evaluation")
 
 
-def evaluate_cfn_bonus_generalization(cfn, env, buffer, num_samples=100):
+def evaluate_cfn_bonus_generalization(cfn, env, buffer, num_samples=1000, device=None):
     """
 
     :param num_samples:
@@ -94,6 +96,9 @@ def evaluate_cfn_bonus_generalization(cfn, env, buffer, num_samples=100):
     :return:
     """
 
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
     # TODO: should i set it to eval mode?
 
     # seen obs from the buffer?
@@ -101,16 +106,16 @@ def evaluate_cfn_bonus_generalization(cfn, env, buffer, num_samples=100):
 
     # Sample unseen observations from the env
     unseen_obs = [env.observation_space.sample() for _ in range(num_samples)]
-    seen_tensor = torch.tensor(seen_obs, dtype=torch.float32)
-    unseen_tensor = torch.tensor(unseen_obs, dtype=torch.float32)
+    seen_tensor = torch.tensor(seen_obs, dtype=torch.float32, device=device)
+    unseen_tensor = torch.tensor(unseen_obs, dtype=torch.float32, device=device)
 
     seen_score = compute_intrinsic_reward(16, cfn.compute_squared_output_norm(seen_tensor))
     unseen_score = compute_intrinsic_reward(16, cfn.compute_squared_output_norm(unseen_tensor))
 
-    seen_norm_mean = seen_score.mean().item()
-    seen_norm_std = seen_score.std().item()
-    unseen_norm_mean = unseen_score.mean().item()
-    unseen_norm_std = unseen_score.std().item()
+    seen_norm_mean = seen_score.mean().cpu().item()
+    seen_norm_std = seen_score.std().cpu().item()
+    unseen_norm_mean = unseen_score.mean().cpu().item()
+    unseen_norm_std = unseen_score.std().cpu().item()
 
     labels = ['Seen', 'Unseen']
     means = [seen_norm_mean, unseen_norm_mean]

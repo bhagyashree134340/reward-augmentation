@@ -1,0 +1,6 @@
+cpu-bind=MASK - dlcgpu12, task  0  0 [17354]: mask 0x1000000010000 set
+Using device: cuda
+Tensor on device: tensor([[ 1.4928,  0.2893,  0.6699],
+        [-2.2344,  0.3793,  0.7981],
+        [-1.8084, -0.8545,  0.8485]], device='cuda:0')
+GPU is working!

@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import wandb
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -81,19 +81,20 @@ def plot_validation_stats(timesteps, returns, lengths, output_dir):
 
 
 def plot_and_save_training_metrics(stats, output_dir, tag="default"):
-    """
-    Plots and saves training metrics as PNGs.
 
-    :param stats: EpisodeStats namedtuple with episode_lengths, episode_rewards, timesteps_on_ep_end
-    :param output_dir: Path to output directory.
-    :param tag: Optional tag to distinguish saved plots.
-    """
+    def to_cpu_scalar_list(x):
+        return [v.detach().cpu().item() if torch.is_tensor(v) else v for v in x]
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    rewards = to_cpu_scalar_list(stats.episode_rewards)
+    lengths = to_cpu_scalar_list(stats.episode_lengths)
+    timesteps = to_cpu_scalar_list(stats.timesteps_on_ep_end)
+
     # Episode Return vs. Episode
     plt.figure(figsize=(10, 5))
-    plt.plot(stats.episode_rewards)
+    plt.plot(rewards)
     plt.xlabel("Episode")
     plt.ylabel("Episode Return")
     plt.title("Episode Return vs. Episode")
@@ -103,7 +104,7 @@ def plot_and_save_training_metrics(stats, output_dir, tag="default"):
 
     # Episode Length vs. Episode
     plt.figure(figsize=(10, 5))
-    plt.plot(stats.episode_lengths)
+    plt.plot(lengths)
     plt.xlabel("Episode")
     plt.ylabel("Episode Length")
     plt.title("Episode Length vs. Episode")
@@ -113,7 +114,7 @@ def plot_and_save_training_metrics(stats, output_dir, tag="default"):
 
     # Episode Return vs. Timesteps
     plt.figure(figsize=(10, 5))
-    plt.plot(stats.timesteps_on_ep_end, stats.episode_rewards)
+    plt.plot(timesteps, rewards)
     plt.xlabel("Environment Timestep")
     plt.ylabel("Episode Return")
     plt.title("Episode Return vs. Environment Timesteps")
@@ -125,12 +126,25 @@ def plot_and_save_training_metrics(stats, output_dir, tag="default"):
 def plot_eval_curve(env_steps, mean_returns, std_returns, save_path: Path):
     """Plots average return with std band."""
     plt.figure(figsize=(8, 5))
-    env_steps = np.array(env_steps)
-    mean_returns = np.array(mean_returns)
-    std_returns = np.array(std_returns)
+
+    if torch.is_tensor(env_steps):
+        env_steps = env_steps.detach().cpu().numpy()
+    else:
+        env_steps = np.array(env_steps)
+
+    if torch.is_tensor(mean_returns):
+        mean_returns = mean_returns.detach().cpu().numpy()
+    else:
+        mean_returns = np.array(mean_returns)
+
+    if torch.is_tensor(std_returns):
+        std_returns = std_returns.detach().cpu().numpy()
+    else:
+        std_returns = np.array(std_returns)
 
     plt.plot(env_steps, mean_returns, label="Mean Return")
-    plt.fill_between(env_steps, mean_returns - std_returns, mean_returns + std_returns, alpha=0.3, label="±1 Std. Dev.")
+    plt.fill_between(env_steps, mean_returns - std_returns, mean_returns + std_returns,
+                     alpha=0.3, label="±1 Std. Dev.")
     plt.xlabel("Environment Steps")
     plt.ylabel("Average Return")
     plt.title("Evaluation Return During Training")
@@ -165,69 +179,6 @@ def plot_return_distributions(return_dict, save_path):
     plt.close()
 
 
-# def cfn_early_vs_late_training_comparison(cfn, eval_dir):
-#     # Get all evaluation files sorted by step
-#     eval_files = sorted(Path(eval_dir).glob("evaluation_step*.npz"),
-#                         key=lambda x: int(x.stem.split("step")[-1]))
-#
-#     # Load first 7 and last 7 files
-#     first_files = eval_files[:7]
-#     last_files = eval_files[-7:]
-#
-#     # Load observations from all files
-#     def load_obs_from_files(files):
-#         all_obs = []
-#         for file in files:
-#             data = np.load(file)
-#             all_obs.append(data["observations"])
-#         return np.concatenate(all_obs)
-#
-#     first_obs = load_obs_from_files(first_files)
-#     last_obs = load_obs_from_files(last_files)
-#
-#     # Compute novelty scores
-#     def compute_novelty(obs, cfn):
-#         scores = []
-#         for state in obs:
-#             state_tensor = torch.FloatTensor(state).unsqueeze(0)
-#             with torch.no_grad():
-#                 score = cfn.compute_squared_output_norm(state_tensor).item()
-#             scores.append(score)
-#         return np.array(scores)
-#
-#     first_scores = compute_novelty(first_obs, cfn)
-#     last_scores = compute_novelty(last_obs, cfn)
-#
-#     # Calculate means and stds
-#     first_mean, first_std = np.mean(first_scores), np.std(first_scores)
-#     last_mean, last_std = np.mean(last_scores), np.std(last_scores)
-#
-#     # Plot comparison
-#     plt.figure(figsize=(8, 6))
-#     bars = plt.bar(
-#         ["First 7 Evals (Early)", "Last 7 Evals (Late)"],
-#         [first_mean, last_mean],
-#         yerr=[first_std, last_std],
-#         capsize=10,
-#         color=["skyblue", "salmon"],
-#         alpha=0.7
-#     )
-#
-#     # Add value labels
-#     for bar in bars:
-#         height = bar.get_height()
-#         plt.text(bar.get_x() + bar.get_width() / 2., height,
-#                  f"{height:.2f} ± {first_std if 'First' in bar.get_label() else last_std:.2f}",
-#                  ha='center', va='bottom')
-#
-#     plt.ylabel("Mean Novelty Score (‖fϕ(s)‖²)")
-#     plt.title("CFN Novelty Comparison: Early vs. Late Training (7 Eval Runs Each)")
-#     plt.grid(True, linestyle='--', alpha=0.3)
-#     plt.savefig(Path(eval_dir).parent / "cfn_novelty_comparison.png")
-#
-#     log.info(f"Early Training - Mean: {first_mean:.2f} ± {first_std:.2f}")
-#     log.info(f"Late Training - Mean: {last_mean:.2f} ± {last_std:.2f}")
-
 
 def cfn_early_vs_late_training_comparison(cfn, eval_dir):
     eval_files = sorted(Path(eval_dir).glob("evaluation_step*.npz"),
@@ -246,13 +197,15 @@ def cfn_early_vs_late_training_comparison(cfn, eval_dir):
     first_obs = load_obs_from_files(first_files)
     last_obs = load_obs_from_files(last_files)
 
+    device = next(cfn.parameters()).device  # Get CFN model device
+
     def compute_novelty(obs, cfn):
         scores = []
         for state in obs:
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
             with torch.no_grad():
-                score = cfn.compute_squared_output_norm(state_tensor).item()
-            scores.append(score)
+                score = cfn.compute_squared_output_norm(state_tensor)
+                scores.append(score.cpu().item())  # Ensure score is on CPU before item()
         return np.array(scores)
 
     first_scores = compute_novelty(first_obs, cfn)
@@ -289,3 +242,23 @@ def cfn_early_vs_late_training_comparison(cfn, eval_dir):
     log.info(f"Plot saved to: {save_path}")
     log.info(f"Early Training - Mean: {first_mean:.2f} ± {first_std:.2f}")
     log.info(f"Late Training - Mean: {last_mean:.2f} ± {last_std:.2f}")
+
+
+
+def log_cfn_stats_to_wandb(cfn, obs, step=None):
+    with torch.no_grad():
+        obs = obs.to(cfn.device) 
+        if obs.ndim == 1:
+            obs = obs.unsqueeze(0)
+
+        combined_out = cfn(obs, update_prior_stats=False)
+        prior_out = cfn.prior(obs)
+        output_norm = combined_out.norm(p=2, dim=1)
+        prior_output_norm = prior_out.norm(p=2, dim=1)
+        pseudocount_estimate = cfn.coin_flip_dim/(output_norm**2)
+
+        wandb.log({
+            "prior_output_norm": prior_output_norm.cpu().numpy(), 
+            "output_norm": output_norm.cpu().numpy(),
+            "pseudocount_estimate":pseudocount_estimate.cpu().numpy(),
+        }, step=step)

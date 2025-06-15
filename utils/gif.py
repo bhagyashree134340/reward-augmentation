@@ -8,13 +8,13 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
+def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000, device=None):
     """
     Evaluates the policy over a number of episodes and stores data similar to SB3's EvalCallback.
     Handles both SAC (returns (action, extra)) and TD3 (returns action only).
     """
-    import torch
-    import numpy as np
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
     actor.eval()
 
@@ -37,7 +37,7 @@ def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
             all_obs.append(obs)
 
             with torch.no_grad():
-                obs_tensor = torch.as_tensor(obs).float().unsqueeze(0)
+                obs_tensor = torch.as_tensor(obs, device=device).float().unsqueeze(0)
                 output = actor(obs_tensor)
                 if isinstance(output, tuple):
                     action = output[0]
@@ -72,10 +72,9 @@ def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000):
     return data
 
 
-def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
-    import imageio
-    import torch
-    import numpy as np
+def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000, device=None):
+
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     frames = []
     obs, _ = env.reset()
@@ -94,8 +93,8 @@ def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
             cam = base_env.mujoco_renderer.viewer.cam
             cam.distance = 4
             cam.lookat[:] = [0.5, 0.5, 0.5]
-            cam.azimuth = 180
-            cam.elevation = -90
+            cam.azimuth = 90
+            cam.elevation = -20
         except Exception as e:
             print("Failed to adjust Fetch camera settings:", e)
 
@@ -106,7 +105,7 @@ def save_rollout_gif(actor, env, gif_path, max_episode_steps=1000):
         obs_tensor = torch.FloatTensor(
             obs if not isinstance(obs, dict)
             else np.concatenate([v.flatten() for v in obs.values()])
-        ).unsqueeze(0)
+        ).unsqueeze(0).to(device)
 
         with torch.no_grad():
             result = actor(obs_tensor)

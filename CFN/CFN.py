@@ -3,16 +3,16 @@ import torch.nn as nn
 
 
 class CoinFlipNetwork(nn.Module):
-    def __init__(self, state_dim, coin_dim, hidden_dim=128):
+    def __init__(self, state_dim, coin_dim, hidden_dim=128, device=None):
         super().__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, coin_dim)
+            nn.Linear(hidden_dim, coin_dim),
+            nn.Tanh()
         )
 
         self.prior = nn.Sequential(
@@ -20,63 +20,56 @@ class CoinFlipNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, coin_dim)
+            nn.Linear(hidden_dim, coin_dim),
+            nn.Tanh()
         )
 
         for param in self.prior.parameters():
             param.requires_grad = False
 
-        # Running statistics to normalize prior output acc to the paper: E[‖f_prior(s)‖²] = 1
-        self.register_buffer("prior_squared_norm_mean", torch.tensor(1.0))
-        self.register_buffer("prior_squared_norm_count", torch.tensor(1e-4))
+        self.register_buffer("prior_mean", torch.zeros(coin_dim))
+        self.register_buffer("prior_var", torch.ones(coin_dim))
+        self.register_buffer("prior_count", torch.tensor(1))
+
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(self.device)
+
+        self.coin_flip_dim = coin_dim
 
     def forward(self, state, update_prior_stats=False):
         state = state.to(self.device)
+
         with torch.no_grad():
             prior_out = self.prior(state)
+
             if update_prior_stats:
                 self.update_prior_stats(prior_out)
 
-            norm_factor = (self.prior_squared_norm_mean + 1e-8).sqrt()
-            normalized_prior = prior_out / norm_factor
+            epsilon = 1e-4 
+            std = torch.sqrt(self.prior_var + epsilon)
+            normalized_prior = (prior_out - self.prior_mean) / std
+
+            normalized_prior = normalized_prior.detach()
 
         return self.net(state) + normalized_prior
+
+
+    def update_prior_stats(self, prior_out):
+        with torch.no_grad():
+            x = prior_out.squeeze(0)  
+            count = self.prior_count.item()
+            new_count = count + 1
+
+            delta = x - self.prior_mean
+            self.prior_mean.add_(delta / new_count)
+
+            delta2 = x - self.prior_mean  
+            self.prior_var.add_(delta * delta2 * count / new_count)
+
+            self.prior_count.fill_(new_count)
 
     def compute_squared_output_norm(self, obs):
         obs = obs.to(self.device)
         with torch.no_grad():
             output = self.forward(obs, update_prior_stats=False)
             return torch.norm(output, p=2, dim=-1) ** 2
-
-    def update_prior_stats(self, prior_output):
-        """
-        Updates running estimate of E[‖f_prior(s)‖²]
-        """
-        with torch.no_grad():
-            batch_squared_norms = prior_output.pow(2).sum(dim=-1)
-            batch_mean = batch_squared_norms.mean()
-
-            self.prior_squared_norm_count += 1
-            delta = batch_mean - self.prior_squared_norm_mean
-            self.prior_squared_norm_mean += delta / self.prior_squared_norm_count
-
-    # def update_prior_stats(self, prior_output):
-    #     with torch.no_grad():
-    #         batch_mean = prior_output.mean(dim=0)
-    #         batch_var = prior_output.var(dim=0, unbiased=False)
-    #         batch_size = prior_output.shape[0]
-    #
-    #         total_count = self.prior_count + batch_size
-    #
-    #         delta = batch_mean - self.prior_mean
-    #         new_mean = self.prior_mean + delta * batch_size / total_count
-    #
-    #         m_a = self.prior_var * self.prior_count
-    #         m_b = batch_var * batch_size
-    #         M2 = m_a + m_b + delta ** 2 * self.prior_count * batch_size / total_count
-    #         new_var = M2 / total_count
-    #
-    #         self.prior_mean = new_mean
-    #         self.prior_var = new_var
-    #         self.prior_count = total_count
