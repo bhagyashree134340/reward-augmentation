@@ -44,12 +44,12 @@ def main():
     )
 
     # TODO: will go in a config
-    actor_path = "/home/raneb/project/reward-augmentation/outputs/2025-06-14/08-47-26-sac_agent-FetchPushDense-v4-True/checkpoints/sac_actor_step1000000.pt"
+    actor_path = "/home/raneb/project/reward-augmentation/outputs/2025-06-15/23-27-34-sac_agent-FetchReach-v4-True/checkpoints/sac_actor_step1000000.pt"
     max_steps = 1000
 
     # TODO: put it in a make_env()
     env = make_env(
-        env_name="FetchPushDense-v4",
+        env_name="FetchReach-v4",
         render_mode="rgb_array",
         max_episode_steps=100,
     )
@@ -68,7 +68,7 @@ def main():
     log.info(f"mean return: {mean_r} ± {std_r}")
 
     #     TODO: add plots and gifs
-    for i in range(5):
+    for i in range(10):
         save_rollout_gif(actor, env, f"evaluate_any_outputs/eval_gif_{i}.gif")
 
 

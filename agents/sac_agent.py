@@ -119,10 +119,9 @@ class SACAgent:
 
             done = terminated or truncated
 
-            # if current_timestep % 1000 == 0:
-            #     wandb.log({
-            #         "ext_reward": reward
-            #     }, step=current_timestep)
+            wandb.log({
+                "ext_reward": reward
+            }, step=current_timestep)
 
             self.buffer.add(
                 obs=np.array(obs, dtype=np.float32),
@@ -233,7 +232,7 @@ class SACAgent:
 
             # Target Q-value with entropy term
             q_target = rew_batch + self.gamma * not_done * (
-                    q_target_min - ent_coef * next_log_prob.sum(dim=-1, keepdim=True))
+                    q_target_min)# - ent_coef * next_log_prob.sum(dim=-1, keepdim=True))
 
         q_losses = []
         q_preds = []

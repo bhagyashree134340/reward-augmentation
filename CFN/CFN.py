@@ -7,20 +7,20 @@ class CoinFlipNetwork(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(state_dim, 64),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(hidden_dim, coin_dim),
+            nn.Linear(32, coin_dim),
             nn.Tanh()
         )
 
         self.prior = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            nn.Linear(state_dim, 64),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(hidden_dim, coin_dim),
+            nn.Linear(32, coin_dim),
             nn.Tanh()
         )
 

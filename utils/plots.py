@@ -197,7 +197,7 @@ def cfn_early_vs_late_training_comparison(cfn, eval_dir):
     first_obs = load_obs_from_files(first_files)
     last_obs = load_obs_from_files(last_files)
 
-    device = next(cfn.parameters()).device  # Get CFN model device
+    device = next(cfn.parameters()).device
 
     def compute_novelty(obs, cfn):
         scores = []
@@ -205,7 +205,7 @@ def cfn_early_vs_late_training_comparison(cfn, eval_dir):
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
             with torch.no_grad():
                 score = cfn.compute_squared_output_norm(state_tensor)
-                scores.append(score.cpu().item())  # Ensure score is on CPU before item()
+                scores.append(score.cpu().item())
         return np.array(scores)
 
     first_scores = compute_novelty(first_obs, cfn)

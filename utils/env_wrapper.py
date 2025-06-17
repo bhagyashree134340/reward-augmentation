@@ -44,6 +44,10 @@ class FetchEnvWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
+        # self._set_object_position(offset=(0.0, 0.1))
+        # self._set_goal_position(offset=(0.1, 0.1, 0.0))
+        # obs = self._flatten_obs(self.env._get_obs())
+        # return obs, info
         return (self._flatten_obs(obs), info) if self.is_goal_env else (obs, info)
 
     def step(self, action):
@@ -51,3 +55,19 @@ class FetchEnvWrapper(gym.Wrapper):
         if self.is_goal_env:
             obs = self._flatten_obs(obs)
         return obs, reward, terminated, truncated, info
+    
+    # def _set_object_position(self, offset=(0.0, 0.0)):
+    #     env = self.env.unwrapped
+    #     object_xpos = env.initial_gripper_xpos[:2] + np.array(offset)
+    #     object_qpos = env.sim.data.get_joint_qpos("object0:joint").copy()
+    #     object_qpos[:2] = object_xpos
+    #     env.sim.data.set_joint_qpos("object0:joint", object_qpos)
+    #     env.sim.forward()
+
+    # def _set_goal_position(self, offset=(0.0, 0.0, 0.0)):
+    #     env = self.env.unwrapped
+    #     goal = env.initial_gripper_xpos.copy()
+    #     goal[2] = env.height_offset
+    #     goal += env.target_offset
+    #     goal += np.array(offset)
+    #     env.goal = goal.copy()

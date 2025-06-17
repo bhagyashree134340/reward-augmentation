@@ -1,7 +1,7 @@
 id: sac_agent
 lr: 3e-4 #3e-4 #0.001 #0.00005
-batch_size: 128 #32 #128
-replay_buffer_size: 1_500_000 # 100
+batch_size: 256 #32 #128
+replay_buffer_size: 500_000 # 100
 tau: 0.005
 num_env_steps: 1_000_000 #300000
 discount_factor: 0.99
