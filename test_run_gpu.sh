@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p aisdlc_gpu-rtx2080       # partition (hav access to htis one)
+#SBATCH -p alldlc_gpu-rtx2080        # partition (hav access to htis one)
 #SBATCH --gres=gpu:1                # request 1 GPU
 #SBATCH --mem=8000                  # 8GB memory
 #SBATCH -t 0-07:00                  # time limit: 7 hours

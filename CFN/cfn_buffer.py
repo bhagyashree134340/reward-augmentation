@@ -60,6 +60,26 @@ class CFNReplayBufferWrapper:
             self.buffer.update_priorities(indices, new_priorities_np)
 
         return obs_batch, coin_flip_batch, indices
+    
+    def sample_with_indices(self, batch_size):
+        sample = self.buffer.sample(batch_size)
+        indices = sample["indexes"]
+
+        obs_batch = torch.tensor(sample["obs"], dtype=torch.float32, device=self.device)
+        coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32, device=self.device)
+
+        return obs_batch, coin_flip_batch, indices
+    
+    def update_priorities(self, indices, obs_batch, cfn, coin_flip_dim):
+        for idx in indices:
+            self.counters[idx] += 1
+
+        counts = torch.tensor([self.counters[i] for i in indices], dtype=torch.float32)
+
+        new_priorities = compute_cfn_priority(cfn, obs_batch, counts, coin_flip_dim, alpha=self.alpha)
+        new_priorities_np = new_priorities.detach().cpu().numpy()
+
+        self.buffer.update_priorities(indices, new_priorities_np)
 
 
 class CFNReplayBuffer:

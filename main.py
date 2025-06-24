@@ -8,6 +8,7 @@ from omegaconf import DictConfig
 
 from agents.sac_agent import SACAgent
 from agents.sac_cfn_agent import SACCFNAgent
+from agents.sac_rnd_agent import SACRNDAgent
 from agents.td3 import TD3Agent
 from agents.td3_cfn import TD3CFNAgent
 from utils.env_wrapper import make_env
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 def create_agent(cfg: DictConfig, env):
     agent_id = cfg.agent.id.lower()
     use_cfn = cfg.agent.cfn
+    use_rnd = cfg.agent.rnd
     eval_env = make_env(cfg.env.id,
                         render_mode=cfg.env.render_mode,
                         max_episode_steps=cfg.env.max_episode_steps)
@@ -36,6 +38,19 @@ def create_agent(cfg: DictConfig, env):
                 cfn_cfg=cfg.cfn,
                 eval_env=eval_env
             )
+        elif use_rnd:
+            agent = SACRNDAgent(
+                env=env,
+                lr=cfg.agent.lr,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                maxlen=cfg.agent.replay_buffer_size,
+                target_entropy=cfg.agent.target_entropy,
+                cfn_cfg=cfg.cfn,
+                eval_env=eval_env
+            )
+
         else:
             agent = SACAgent(
                 env=env,
@@ -76,7 +91,6 @@ def create_agent(cfg: DictConfig, env):
                 policy_frequency=cfg.agent.policy_frequency,
                 noise_clip=cfg.agent.noise_clip,
             )
-
     else:
         raise ValueError(f"Unsupported agent id: {agent_id}")
 

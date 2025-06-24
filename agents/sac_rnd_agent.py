@@ -17,32 +17,63 @@ from utils.gif import save_rollout_gif
 from utils.plots import log_cfn_stats_to_wandb, plot_and_save_training_metrics, plot_eval_curve, cfn_early_vs_late_training_comparison
 from utils.stats import EpisodeStats
 import logging
+from gym.wrappers.normalize import RunningMeanStd
 
 from utils.validate import validate
 
 log = logging.getLogger(__name__)
 
+from torch import nn
 
-class SACCFNAgent(SACAgent):
-    def __init__(self, env, cfn_cfg, **kwargs):
+class RewardForwardFilter:
+    def __init__(self, gamma):
+        self.rewems = None
+        self.gamma = gamma
+
+    def update(self, rews):
+        if self.rewems is None:
+            self.rewems = rews
+        else:
+            self.rewems = self.rewems * self.gamma + rews
+        return self.rewems
+
+class RNDModel(nn.Module):
+    def __init__(self, input_size, output_size=512):
+        super().__init__()
+
+        self.predictor = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_size)
+        )
+
+        self.target = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_size)
+        )
+
+        for param in self.target.parameters():
+            param.requires_grad = False
+
+    def forward(self, x):
+        with torch.no_grad():
+            target = self.target(x)
+        pred = self.predictor(x)
+        return pred, target
+
+
+class SACRNDAgent(SACAgent):
+    def __init__(self, env, rnd_cfg, **kwargs):
         super().__init__(env, **kwargs)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.cfn_cfg = cfn_cfg
-        self.use_cfn_prior = cfn_cfg.use_cfn_prior
-        self.use_cfn_priority = cfn_cfg.use_cfn_priority
-        self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
-
-        self.cfn = CoinFlipNetwork(env.observation_space.shape[0], self.coin_flip_dim).to(self.device)
-        self.cfn_optimizer = optim.Adam(self.cfn.parameters(), lr=self.cfn_cfg.cfn_lr)
-
-        self.cfn_buffer = CFNReplayBufferWrapper(
-            size=cfn_cfg.cfn_replay_buffer_size,
-            obs_shape=env.observation_space.shape[0],
-            coin_flip_dim=self.coin_flip_dim,
-            alpha=0.5
-        )
+        self.use_rnd = True #TODO: change this to take from config
+        self.rnd = RNDModel(env.observation_space.shape[0]).to(self.device)
+        self.rnd_optimizer = torch.optim.Adam(self.rnd.predictor.parameters(), lr=1e-4)
+        self.obs_rms = RunningMeanStd(shape=env.observation_space.shape)
+        self.int_reward_rms = RunningMeanStd(shape=())
 
         self.is_goal_env = hasattr(env, 'is_goal_env') and env.is_goal_env
 
@@ -75,61 +106,22 @@ class SACCFNAgent(SACAgent):
             next_obs = torch.tensor(next_obs_np, dtype=torch.float32, device=self.device)
             done = terminated or truncated
 
-            intrinsic_reward = compute_intrinsic_reward(
-                self.coin_flip_dim,
-                self.cfn.compute_squared_output_norm(obs)
-            )
 
-            # intrinsic_reward *= 20
-
-            avg_rewards.append(intrinsic_reward.item()+reward)
-
-            if self.use_cfn_prior:
-                if current_timestep<30_000 or current_timestep>970_000:
-                    with torch.no_grad():
-                        obs = obs.to(self.cfn.device) 
-                        if obs.ndim == 1:
-                            obs = obs.unsqueeze(0)
-
-                        combined_out = self.cfn(obs, update_prior_stats=False)
-                        cfn_out = self.cfn.net(obs)
-                        prior_out = self.cfn.prior(obs)
-                        output_norm_sq = combined_out.norm(p=2, dim=1)**2
-                        cfn_out_norm_sq = cfn_out.norm(p=2, dim=1)**2
-                        prior_output_norm_sq = prior_out.norm(p=2, dim=1)**2
-                        pseudocount_estimate = self.cfn.coin_flip_dim/output_norm_sq
-
-                        wandb.log({
-                            "pseudocounts-intr": 1/(intrinsic_reward**2 + 1e-8),
-                            "prior_output_norm_sq": prior_output_norm_sq.cpu().numpy(), 
-                            "cfn_output_norm_sq": cfn_out_norm_sq.cpu().numpy(), 
-                            "output_norm_sq": output_norm_sq.cpu().numpy(),
-                            "pseudocount_estimate":pseudocount_estimate.cpu().numpy(),
-                        }, step=current_timestep)
-
-                self.cfn(obs, update_prior_stats=True)
-
-                
-            # if current_timestep % 1000 == 0:
-            wandb.log({
-                "ext_reward": reward,
-                "int_reward": intrinsic_reward.item(),
-                "total_reward": reward+intrinsic_reward.item()
-                # "averaged_rewards": np.average(avg_rewards),
-                # "pseudocounts-intr": 1/torch.sqrt(intrinsic_reward+1e-8).item()
-            }, step=current_timestep)
-            
-            # avg_rewards.clear()
+            obs_tensor = torch.tensor(next_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            pred, target = self.rnd(obs_tensor)
+            int_rew = F.mse_loss(pred, target.detach(), reduction='none').mean().item()
+            normed_int_rew = int_rew / np.sqrt(self.reward_rms.var + 1e-8)
+            total_rew = reward + self.beta * normed_int_rew
 
             self.buffer.add(
-                obs=obs.cpu().numpy(),
+                obs=np.array(obs, dtype=np.float32),
                 act=np.array(action, dtype=np.float32),
                 ext_rew=np.array(reward, dtype=np.float32),
-                int_rew=intrinsic_reward.cpu().numpy().astype(np.float32),
-                next_obs=next_obs.cpu().numpy(),
+                int_rew=np.array(normed_int_rew, dtype=np.float32),
+                next_obs=np.array(next_obs, dtype=np.float32),
                 done=np.array(done, dtype=np.float32)
-            )
-
+            ) 
+ 
             coin_flip = get_coin_flips(self.coin_flip_dim)
             self.cfn_buffer.add(
                 obs=obs.cpu().numpy(),
