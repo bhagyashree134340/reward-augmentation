@@ -47,7 +47,7 @@ def create_agent(cfg: DictConfig, env):
                 batch_size=cfg.agent.batch_size,
                 maxlen=cfg.agent.replay_buffer_size,
                 target_entropy=cfg.agent.target_entropy,
-                cfn_cfg=cfg.cfn,
+                rnd_cfg=cfg.cfn,
                 eval_env=eval_env
             )
 
