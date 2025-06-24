@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class CoinFlipNetwork(nn.Module):
@@ -73,3 +74,10 @@ class CoinFlipNetwork(nn.Module):
         with torch.no_grad():
             output = self.forward(obs, update_prior_stats=False)
             return torch.norm(output, p=2, dim=-1) ** 2
+
+    def update_cfn_network(self, cfn, cfn_optimizer, obs_batch, coin_flip_batch):
+        predicted_coin_flips = cfn(obs_batch)
+        cfn_loss = F.mse_loss(predicted_coin_flips, coin_flip_batch)
+        cfn_optimizer.zero_grad()
+        cfn_loss.backward()
+        cfn_optimizer.step()

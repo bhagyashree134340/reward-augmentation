@@ -14,7 +14,8 @@ from agents.sac_agent import SACAgent
 from replay_buffer.replay_buffer import make_replay_buffer
 from utils.evaluate import evaluate_cfn_bonus_generalization, evaluate
 from utils.gif import save_rollout_gif
-from utils.plots import log_cfn_stats_to_wandb, plot_and_save_training_metrics, plot_eval_curve, cfn_early_vs_late_training_comparison
+from utils.plots import log_cfn_stats_to_wandb, plot_and_save_training_metrics, plot_eval_curve, \
+    cfn_early_vs_late_training_comparison
 from utils.stats import EpisodeStats
 import logging
 
@@ -54,14 +55,13 @@ class SACCFNAgent(SACAgent):
         episode_lengths = []
         episode_rewards = []
         timesteps_on_ep_end = []
-        avg_rewards=[]
+        avg_rewards = []
 
         obs_np, _ = self.env.reset()
         obs = torch.tensor(obs_np, dtype=torch.float32, device=self.device)
 
         while current_timestep < total_timesteps:
 
-            
             with torch.no_grad():
                 action, _ = self.actor(obs)
                 action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
@@ -75,12 +75,12 @@ class SACCFNAgent(SACAgent):
                 self.cfn.compute_squared_output_norm(obs)
             )
 
-            avg_rewards.append(intrinsic_reward.item()+reward)
+            avg_rewards.append(intrinsic_reward.item() + reward)
 
             if self.use_cfn_prior:
-                if current_timestep<30_000 or current_timestep>970_000:
+                if current_timestep < 30_000 or current_timestep > 970_000:
                     with torch.no_grad():
-                        obs = obs.to(self.cfn.device) 
+                        obs = obs.to(self.cfn.device)
                         if obs.ndim == 1:
                             obs = obs.unsqueeze(0)
 
@@ -88,18 +88,17 @@ class SACCFNAgent(SACAgent):
                         prior_out = self.cfn.prior(obs)
                         output_norm = combined_out.norm(p=2, dim=1)
                         prior_output_norm = prior_out.norm(p=2, dim=1)
-                        pseudocount_estimate = self.cfn.coin_flip_dim/(output_norm**2)
+                        pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2)
 
                         wandb.log({
-                            "pseudocounts-intr": 1/torch.sqrt(intrinsic_reward+1e-8).item(),
-                            "prior_output_norm": prior_output_norm.cpu().numpy(), 
+                            "pseudocounts-intr": 1 / (intrinsic_reward**2 + 1e-8).item(),
+                            "prior_output_norm": prior_output_norm.cpu().numpy(),
                             "output_norm": output_norm.cpu().numpy(),
-                            "pseudocount_estimate":pseudocount_estimate.cpu().numpy(),
+                            "pseudocount_estimate": pseudocount_estimate.cpu().numpy(),
                         }, step=current_timestep)
 
                 self.cfn(obs, update_prior_stats=True)
 
-                
             if current_timestep % 1000 == 0:
                 wandb.log({
                     "ext_reward": reward,
@@ -107,7 +106,7 @@ class SACCFNAgent(SACAgent):
                     "averaged_rewards": np.average(avg_rewards),
                     # "pseudocounts-intr": 1/torch.sqrt(intrinsic_reward+1e-8).item()
                 }, step=current_timestep)
-                
+
                 avg_rewards.clear()
 
             self.buffer.add(
@@ -142,17 +141,16 @@ class SACCFNAgent(SACAgent):
 
                 self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, tm_batch, current_timestep)
 
-                obs_batch_bc, coin_flip_batch_bc, _ = self.cfn_buffer.sample_and_update_priorities(
-                    batch_size=self.cfn_cfg.cfn_batch_size,
-                    cfn=self.cfn,
-                    coin_flip_dim=self.coin_flip_dim,
-                    use_cfn_priority=self.use_cfn_priority
+            obs_batch_bc, coin_flip_batch_bc, indices = self.cfn_buffer.sample_with_indices(
+                batch_size=self.cfn_cfg.cfn_batch_size
+            )
+
+            self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
+
+            if self.use_cfn_priority:
+                self.cfn_buffer.update_priorities(
+                    indices, obs_batch_bc, self.cfn, self.coin_flip_dim
                 )
-
-                # obs_batch_bc = torch.tensor(obs_batch_bc, dtype=torch.float32, device=self.device)
-                # coin_flip_batch_bc = torch.tensor(coin_flip_batch_bc, dtype=torch.float32, device=self.device)
-                self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
-
 
             obs = next_obs
             episode_return += reward + intrinsic_reward
@@ -184,7 +182,8 @@ class SACCFNAgent(SACAgent):
             if current_timestep % 10000 == 0:
                 validate(self.actor, current_timestep)
 
-                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_episode_steps)
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep,
+                                                             max_episode_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)
