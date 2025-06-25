@@ -44,12 +44,12 @@ def main():
     )
 
     # TODO: will go in a config
-    actor_path = "/home/raneb/project/reward-augmentation/outputs/2025-06-15/23-27-34-sac_agent-FetchReach-v4-True/checkpoints/sac_actor_step1000000.pt"
+    actor_path = "/home/raneb/project/reward-augmentation/outputs/2025-06-25/01-08-21-sac_agent-FetchReachDense-v4-True/checkpoints/sac_actor_step1000000.pt"
     max_steps = 1000
 
     # TODO: put it in a make_env()
     env = make_env(
-        env_name="FetchReach-v4",
+        env_name="FetchReachDense-v4",
         render_mode="rgb_array",
         max_episode_steps=100,
     )

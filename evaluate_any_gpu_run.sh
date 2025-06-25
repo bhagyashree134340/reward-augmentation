@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p aisdlc_gpu-rtx2080     
+#SBATCH -p alldlc_gpu-rtx2080     
 #SBATCH --gres=gpu:1                
 #SBATCH --mem=2000              
 #SBATCH -t 0-00:10                  

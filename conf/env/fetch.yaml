@@ -1,4 +1,4 @@
-id: FetchReach-v3 #FetchPush-v4 #FetchReachDense-v4
+id: FetchReachDense-v4 #FetchPush-v4 #FetchReachDense-v4
 render_mode: rgb_array
 use_goal: True
 max_episode_steps: 50
