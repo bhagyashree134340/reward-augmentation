@@ -2,29 +2,19 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.optim as optim
 import wandb
-from cpprb import HindsightReplayBuffer
 from hydra.core.hydra_config import HydraConfig
 import torch.nn.functional as F
-from CFN.CFN import CoinFlipNetwork
-from CFN.cfn_buffer import CFNReplayBufferWrapper
-from CFN.priority_util import compute_intrinsic_reward, get_coin_flips
 from agents.sac_agent import SACAgent
-from replay_buffer.replay_buffer import make_replay_buffer
-from utils.evaluate import evaluate_cfn_bonus_generalization, evaluate
-from utils.gif import save_rollout_gif
-from utils.plots import log_cfn_stats_to_wandb, plot_and_save_training_metrics, plot_eval_curve, \
-    cfn_early_vs_late_training_comparison
+from utils.evaluate import evaluate
+from utils.plots import plot_and_save_training_metrics, plot_eval_curve
 from utils.stats import EpisodeStats
 import logging
 from gym.wrappers.normalize import RunningMeanStd
-
+from torch import nn
 from utils.validate import validate
 
 log = logging.getLogger(__name__)
-
-from torch import nn
 
 
 class RewardForwardFilter:
@@ -45,15 +35,21 @@ class RNDModel(nn.Module):
         super().__init__()
 
         self.predictor = nn.Sequential(
-            nn.Linear(input_size, 128),
+            nn.Linear(input_size, 512),
             nn.ReLU(),
-            nn.Linear(128, output_size)
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, output_size)
         )
 
         self.target = nn.Sequential(
-            nn.Linear(input_size, 128),
+            nn.Linear(input_size, 512),
             nn.ReLU(),
-            nn.Linear(128, output_size)
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, output_size)
         )
 
         for param in self.target.parameters():
@@ -72,6 +68,7 @@ class SACRNDAgent(SACAgent):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.use_rnd = True  # TODO: change this to take from config
+        self.update_proportion = 0.25
         self.rnd = RNDModel(env.observation_space.shape[0]).to(self.device)
         self.rnd_optimizer = torch.optim.Adam(self.rnd.predictor.parameters(), lr=1e-4)
         self.obs_rms = RunningMeanStd(shape=env.observation_space.shape)
@@ -87,13 +84,29 @@ class SACRNDAgent(SACAgent):
         episode_lengths = []
         episode_rewards = []
         timesteps_on_ep_end = []
-        avg_rewards = []
 
         obs_np, _ = self.env.reset()
         obs = torch.tensor(obs_np, dtype=torch.float32, device=self.device)
 
-        while current_timestep < total_timesteps:
+        # ---- RND observation normalization warm-up START----
+        M = 1000
+        for _ in range(M):
+            random_action = self.env.action_space.sample()
+            next_obs_np, _, terminated, truncated, _ = self.env.step(random_action)
+            next_obs = torch.tensor(next_obs_np, dtype=torch.float32, device=self.device)
+            self.obs_rms.update(next_obs[None, :].cpu().numpy())
 
+            done = terminated or truncated
+            if done:
+                obs_np, _ = self.env.reset()
+                obs = torch.tensor(obs_np, dtype=torch.float32, device=self.device)
+            else:
+                obs = next_obs
+        # ---- RND observation normalization warm-up END----
+
+        reward_forward_filter = RewardForwardFilter(gamma=0.99)  # TODO: Config
+
+        while current_timestep < total_timesteps:
             gripper_pos = obs[:3]
             goal_pos = obs[-3:]
             distance = np.linalg.norm(gripper_pos.cpu().numpy() - goal_pos.cpu().numpy())
@@ -110,23 +123,26 @@ class SACRNDAgent(SACAgent):
             self.obs_rms.update(next_obs[None, :].cpu().numpy())
             mean = torch.tensor(self.obs_rms.mean, device=self.device, dtype=next_obs.dtype)
             var = torch.tensor(self.obs_rms.var, device=self.device, dtype=next_obs.dtype)
-            obs_normed = (next_obs - mean) / torch.sqrt(var + 1e-8)
-            obs_normed = torch.clamp(obs_normed, -5.0, 5.0)
+            next_obs_normed = (next_obs - mean) / torch.sqrt(var + 1e-8)
+            next_obs_normed = torch.clamp(next_obs_normed, -5.0, 5.0)
 
-            obs_tensor = obs_normed.unsqueeze(0)
+            obs_tensor = next_obs_normed.unsqueeze(0)
 
             with torch.no_grad():
                 predict_feature, target_feature = self.rnd(obs_tensor)
-                int_reward = F.mse_loss(predict_feature, target_feature, reduction='none').mean(dim=-1).item()
+                raw_int_reward = ((target_feature - predict_feature).pow(2).sum(1) / 2).data
 
-            self.int_reward_rms.update(np.array([int_reward]))
-            int_reward /= np.sqrt(self.int_reward_rms.var + 1e-8)
+            filtered_int_reward = reward_forward_filter.update(np.array([raw_int_reward.cpu().item()]))
+            self.int_reward_rms.update_from_moments(
+                np.mean(filtered_int_reward), np.var(filtered_int_reward), len(filtered_int_reward)
+            )
+            normed_int_reward = raw_int_reward / np.sqrt(self.int_reward_rms.var + 1e-8)
 
             self.buffer.add(
                 obs=obs.detach().cpu().numpy(),
                 act=action,
                 ext_rew=np.array(reward, dtype=np.float32),
-                int_rew=np.array(int_reward, dtype=np.float32),
+                int_rew=np.array(normed_int_reward.item(), dtype=np.float32),
                 next_obs=next_obs.detach().cpu().numpy(),
                 done=np.array(done, dtype=np.float32)
             )
@@ -141,10 +157,7 @@ class SACRNDAgent(SACAgent):
                 int_rew_batch = torch.tensor(sample["int_rew"], dtype=torch.float32, device=self.device).squeeze(-1)
                 tm_batch = torch.tensor(sample["done"], dtype=torch.float32, device=self.device).squeeze(-1)
 
-                # total_rew_batch = int_rew_batch + ext_rew_batch
-
-                total_rew_batch = (0.9*int_rew_batch) + ext_rew_batch
-
+                total_rew_batch = int_rew_batch + ext_rew_batch
                 self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, tm_batch, current_timestep)
 
                 rnd_loss = self.update_rnd(next_obs_batch)
@@ -152,12 +165,12 @@ class SACRNDAgent(SACAgent):
 
             wandb.log({
                 "rewards/extrinsic": reward,
-                "rewards/intrinsic": int_reward,
-                "rewards/total": reward + int_reward
+                "rewards/intrinsic": normed_int_reward,
+                "rewards/total": reward + normed_int_reward
             }, step=current_timestep)
 
             obs = next_obs
-            episode_return += reward + int_reward
+            episode_return += reward + normed_int_reward
             episode_step += 1
             current_timestep += 1
 
@@ -174,7 +187,7 @@ class SACRNDAgent(SACAgent):
 
                 log.info(
                     f"Episode {episode_num} | Steps: {episode_step} | "
-                    f"Return: {episode_return:.2f} | Total Timesteps: {current_timestep}"
+                    f"Return: {episode_return.item():.2f} | Total Timesteps: {current_timestep}"
                 )
 
                 obs_np, _ = self.env.reset()
@@ -185,9 +198,8 @@ class SACRNDAgent(SACAgent):
 
             if current_timestep % 10000 == 0:
                 validate(self.actor, current_timestep)
-
-                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep,
-                                                             max_episode_steps)
+                eval_envstep, eval_mean, eval_std = evaluate(
+                    self.actor, self.eval_env, current_timestep, max_episode_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)
@@ -207,20 +219,19 @@ class SACRNDAgent(SACAgent):
         plot_path = Path(HydraConfig.get().runtime.output_dir) / "validate" / f"eval_plot_step{current_timestep}.png"
         plot_eval_curve(self.eval_envsteps, self.eval_means, self.eval_stds, plot_path)
 
-
     def update_rnd(self, obs_batch: torch.Tensor) -> float:
         obs_normed = (obs_batch - torch.as_tensor(self.obs_rms.mean, device=self.device)) / \
-                    torch.sqrt(torch.as_tensor(self.obs_rms.var, device=self.device) + 1e-8)
-        obs_normed = torch.clamp(obs_normed, -5.0, 5.0)
-
-        obs_normed = obs_normed.to(dtype=torch.float32)
+                     torch.sqrt(torch.as_tensor(self.obs_rms.var, device=self.device) + 1e-8)
+        obs_normed = torch.clamp(obs_normed, -5.0, 5.0).float()
 
         predict_feat, target_feat = self.rnd(obs_normed)
+        forward_loss = F.mse_loss(predict_feat, target_feat, reduction='none').mean(dim=-1)
 
-        rnd_loss = F.mse_loss(predict_feat, target_feat)
+        mask = (torch.rand(len(forward_loss), device=self.device) < self.update_proportion).float()
+        masked_loss = (forward_loss * mask).sum() / (mask.sum() + 1e-8)
 
         self.rnd_optimizer.zero_grad()
-        rnd_loss.backward()
+        masked_loss.backward()
         self.rnd_optimizer.step()
 
-        return rnd_loss.item()
+        return masked_loss.item()
