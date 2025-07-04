@@ -46,7 +46,7 @@ class CoinFlipNetwork(nn.Module):
             if update_prior_stats:
                 self.update_prior_stats(prior_out)
 
-            epsilon = 1e-4 
+            epsilon = 1e-4
             std = torch.sqrt(self.prior_var + epsilon)
             normalized_prior = (prior_out - self.prior_mean) / std
 
@@ -54,17 +54,16 @@ class CoinFlipNetwork(nn.Module):
 
         return self.net(state) + normalized_prior
 
-
     def update_prior_stats(self, prior_out):
         with torch.no_grad():
-            x = prior_out.squeeze(0)  
+            x = prior_out.squeeze(0)
             count = self.prior_count.item()
             new_count = count + 1
 
             delta = x - self.prior_mean
             self.prior_mean.add_(delta / new_count)
 
-            delta2 = x - self.prior_mean  
+            delta2 = x - self.prior_mean
             self.prior_var.add_(delta * delta2 * count / new_count)
 
             self.prior_count.fill_(new_count)
