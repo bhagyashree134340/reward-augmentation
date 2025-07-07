@@ -6,6 +6,8 @@ import imageio
 import gymnasium as gym
 from gymnasium.wrappers.utils import RunningMeanStd
 from matplotlib import pyplot as plt
+from matplotlib.colors import LogNorm
+
 import wandb
 import random
 
@@ -254,16 +256,16 @@ def main():
     set_seed(seed)
 
     wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts")
-    # map = [
-    #     "SHFFFFFF",
-    #     "FFFFFHFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFHFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFHFF",
-    #     "FFFHFFFG",
-    # ]
+    map = [
+        "SHFFFFFF",
+        "FFFFFHFF",
+        "FFFFFFFF",
+        "FFFFFFFF",
+        "FFHFFFFF",
+        "FFFFFFFF",
+        "FFFFFHFF",
+        "FFFHFFFG",
+    ]
 
     # map = [
     #     "SFFFFFFF",
@@ -292,24 +294,24 @@ def main():
     # ]
 
     # TODO: Try this on the KISLURM
-    map = [
-        "SFFFFFFHFFFFFFFF",
-        "FHFFFFFHFFFFFHFF",
-        "FFFHFFFFFFFHFFFF",
-        "FHHFFFHFFFHFFFFF",
-        "FFFHFFFFFFFFHFFF",
-        "FFFFFHFFFFHFHFFF",
-        "FHFHFFFFFFFFFHFF",
-        "FFFFFHFFFFFHFHFF",
-        "FHFFFFFFHFFFFHFF",
-        "FFFFFHFFFHFFFFHF",
-        "FHFFFFHFFFHFFFFF",
-        "FFFFFHFFFFFFHFFF",
-        "FFHFHFFFFHFHFHFF",
-        "FFFHFFFFFHFFFFFH",
-        "FFFFHFHFFFFFFHFF",
-        "FFFFFFFFFFFFFFFG"
-    ]
+    # map = [
+    #     "SFFFFFHFFFFHFHFH",
+    #     "FHFFFFHFFFFFHFFF",
+    #     "FFFHFFFFHFFFFHFF",
+    #     "FHHFFHHFFFHFHFFF",
+    #     "FFHFFFFFFHFFFHFF",
+    #     "FFFFFHFFFHFHHFFF",
+    #     "FHFHFFFFFHFFFFHF",
+    #     "FFFHFHFFFFFHFHFF",
+    #     "FHFFFFFHFFFFFHFF",
+    #     "FFFFFHFFHHFFFFHF",
+    #     "FHFFFHFFFHHFFFFF",
+    #     "FFFFFHFFFFFHFFFF",
+    #     "FFHFHFHFFHFHFHFF",
+    #     "FFHFFFFFHFFFFFHF",
+    #     "FFFFHFHFFFFHFFFF",
+    #     "FFFFFFHFHFHFFFGF"
+    # ]
 
     env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array", desc=map, max_episode_steps=1000)
     state_size = env.observation_space.n
@@ -328,7 +330,7 @@ def main():
         reward_rms,
         discounted_reward,
         intrinsic_coef=intrinsic_coef,
-        max_timesteps=100000,
+        max_timesteps=50000,
         alpha=0.1,
         gamma=0.999,
         epsilon=1.0,
