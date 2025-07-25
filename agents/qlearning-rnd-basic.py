@@ -85,7 +85,7 @@ def train_q_learning(env, rnd,
                      reward_rms,
                      discounted_reward,
                      max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
-                     intrinsic_coef, rnd_mask_prob=0.75):  # 0.25
+                     intrinsic_coef, rnd_mask_prob=1.0):  # 0.25 #0.75
     state_size = env.observation_space.n
     action_size = env.action_space.n
     Q = np.zeros((state_size, action_size))

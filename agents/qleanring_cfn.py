@@ -1,3 +1,4 @@
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +65,9 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
+        if done and next_state == 63:
+            reward = 10.0
+
         intrinsic_reward = compute_intrinsic_reward(
             coin_flip_dim,
             cfn.compute_squared_output_norm(obs_tensor)
@@ -87,6 +91,10 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
         update_cfn_network(cfn, cfn_optimizer, obs_batch_bc, coin_flip_batch_bc)
         cfn_buffer.update_priorities(indices, obs_batch_bc, cfn, coin_flip_dim)
 
+        if total_timesteps % 1000 == 0 and total_timesteps > 0:
+            avg_reward = evaluate_agent(Q, env, episodes=20)
+            wandb.log({"eval/avg_reward": avg_reward}, step=total_timesteps)
+
         total_timesteps += 1
         episode_reward += reward
         episode_length += 1
@@ -95,18 +103,13 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
         true_counts[state] += 1
         _ = cfn(obs_tensor, update_prior_stats=True)
 
-        if total_timesteps % 100 == 0:
+        if done:
             print(
                 f"Timestep {total_timesteps}, "
                 f"Epsilon {epsilon:.3f}, Return {episode_reward:.2f}, "
                 f"Length {episode_length}"
             )
 
-        if done:
-            # if total_timesteps % 100 == 0:
-            #     print(
-            #         f"Timestep {total_timesteps}, Epsilon: {epsilon:.3f}, Episode return: {episode_reward:.2f}, Episode Length: {episode_length}"
-            #     )
             if epsilon > epsilon_min:
                 epsilon *= epsilon_decay
             state, _ = env.reset()
@@ -118,7 +121,7 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
     return Q, true_counts
 
 
-def evaluate_agent(Q, env, episodes=100, gif_path="frozenlake_qlearning_20x20.gif"):
+def evaluate_agent(Q, env, episodes=100, save_gif_at_end=False, gif_path="frozenlake_qlearning_20x20.gif"):
     total_rewards = 0
     for _ in range(episodes):
         state, _ = env.reset()
@@ -128,7 +131,9 @@ def evaluate_agent(Q, env, episodes=100, gif_path="frozenlake_qlearning_20x20.gi
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total_rewards += reward
-    save_gif(Q, env, gif_path)
+
+    if save_gif_at_end:
+        save_gif(Q, env, gif_path)
     return total_rewards / episodes
 
 
@@ -180,7 +185,7 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
         else:
             percent_error = 0
             percent_error_b = 0
-        print(f"State {s}: True Count = {true}, Pseudo Count = {pseudo:.2f}, Deviation = {percent_error:.2f}%")
+        # print(f"State {s}: True Count = {true}, Pseudo Count = {pseudo:.2f}, Deviation = {percent_error:.2f}%")
 
     fig, axs = plt.subplots(1, 3, figsize=(18, 5))
     max_val = max(max(true_counts), max(pseudo_count))
@@ -280,22 +285,81 @@ def log_counts_to_wandb(cfn, true_counts, coin_flip_dim):
         print(f"{s}\t{true_counts[s]}\t\t{pseudo_bonus[s]:.4f}")
 
 
+def train_q_learning_vanilla(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
+                             buffer_size=50000, batch_size=64):
+    state_size = env.observation_space.n
+    action_size = env.action_space.n
+    Q = np.zeros((state_size, action_size))
+    true_counts = np.zeros(state_size, dtype=np.int32)
+
+    replay_buffer = deque(maxlen=buffer_size)
+
+    total_timesteps = 0
+    episode_reward = 0
+    episode_length = 0
+    state, _ = env.reset()
+    true_counts[state] += 1
+
+    while total_timesteps < max_timesteps:
+        if np.random.rand() < epsilon or np.all(Q[state] == 0):
+            action = np.random.choice(action_size)
+        else:
+            action = np.argmax(Q[state])
+
+        next_state, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+
+        if done and next_state == 63:
+            reward = 10.0
+
+        replay_buffer.append((state, action, reward, next_state, done))
+
+        if len(replay_buffer) >= batch_size:
+            batch = random.sample(replay_buffer, batch_size)
+            for s, a, r, s_next, d in batch:
+                target = r + (0.0 if d else gamma * np.max(Q[s_next]))
+                Q[s, a] += alpha * (target - Q[s, a])
+
+        if total_timesteps % 1000 == 0 and total_timesteps > 0:
+            avg_reward = evaluate_agent(Q, env, episodes=20)
+            wandb.log({"eval/avg_reward_van": avg_reward, "eval/step_van": total_timesteps})
+
+        total_timesteps += 1
+        episode_reward += reward
+        episode_length += 1
+        state = next_state
+        true_counts[state] += 1
+
+        if done:
+            print(
+                f"[Vanilla Q] Timestep {total_timesteps}, Return {episode_reward:.2f}, Length {episode_length}"
+            )
+            if epsilon > epsilon_min:
+                epsilon *= epsilon_decay
+            state, _ = env.reset()
+            true_counts[state] += 1
+            episode_reward = 0
+            episode_length = 0
+
+    return Q, true_counts
+
+
 def main():
     # seed = 42
     # set_seed(seed)
 
-    wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts", mode="disabled")
+    wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts")
     map = [
-        "SHFFFFFF",
+        "SFFFFFFH",
+        "HHHHFFFH",
         "FFFFFHFF",
-        "FFFFFFFF",
-        "FFFFFFFF",
-        "FFHFFFFF",
-        "FFFFFFFF",
-        "FFFFFHFF",
-        "FFFHFFFG",
+        "FGFFFFFH",
+        "FHFFFHFF",
+        "FHFFFFHF",
+        "FFFFHHHF",
+        "HHHHHFFG",
     ]
-
+    #
     # map = [
     #     "SFFFFFFFFFFF",
     #     "FFFFFFFFFFFF",
@@ -310,7 +374,7 @@ def main():
     #     "FFFFFFFFFFFF",
     #     "FFFFFFFFFFFG"
     # ]
-
+    #
     # map = [
     #     "SFFFFFFFFFFFFFFF",
     #     "FFFFFFFFFFFFFFFF",
@@ -345,22 +409,37 @@ def main():
 
     Q, true_counts = train_q_learning(
         env=env,
-        max_timesteps=50000,
+        max_timesteps=100000,
         alpha=0.8,
         gamma=0.95,
         epsilon=1.0,
         epsilon_decay=0.995,
-        epsilon_min=0.01,
+        epsilon_min=0.1,
         cfn=cfn,
         cfn_buffer=cfn_buffer,
         cfn_optimizer=cfn_optimizer,
         coin_flip_dim=coin_flip_dim
     )
 
-    avg_reward = evaluate_agent(Q, env)
+    Q_vanilla, true_counts_vanilla = train_q_learning_vanilla(
+        env=env,
+        max_timesteps=100000,
+        alpha=0.1,
+        gamma=0.999,
+        epsilon=1.0,
+        epsilon_decay=0.9995,
+        epsilon_min=0.05,
+        buffer_size=50000,
+        batch_size=64
+    )
+
+    avg_reward = evaluate_agent(Q, env, save_gif_at_end=True)
     print(f"\nAverage evaluation reward over 100 episodes: {avg_reward:.2f}")
 
     plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim)
+
+    print(true_counts.reshape(int(np.sqrt(len(true_counts))), int(np.sqrt(len(true_counts)))))
+    print(true_counts_vanilla.reshape(int(np.sqrt(len(true_counts_vanilla))), int(np.sqrt(len(true_counts_vanilla)))))
 
 
 if __name__ == "__main__":

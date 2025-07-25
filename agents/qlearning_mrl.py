@@ -14,6 +14,7 @@ import wandb
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 def set_seed(seed=42):
     np.random.seed(seed)
     random.seed(seed)
@@ -75,7 +76,7 @@ def plot_true_vs_munchausen_bonus_heatmap(Q, true_counts, tau, alpha_m, lo, env,
 
 
 def train_q_learning(env, max_timesteps, alpha, tau, gamma, epsilon, epsilon_decay, epsilon_min, alpha_m, lo,
-                     buffer_size=50000, batch_size=64):
+                     buffer_size=50000, batch_size=64, noise_std=0.5):
     state_size = env.observation_space.n
     action_size = env.action_space.n
     Q = np.zeros((state_size, action_size))
@@ -103,6 +104,7 @@ def train_q_learning(env, max_timesteps, alpha, tau, gamma, epsilon, epsilon_dec
             action = np.argmax(Q[state])
 
         next_state, reward, terminated, truncated, _ = env.step(action)
+        # reward += np.random.normal(loc=0.0, scale=noise_std)
         done = terminated or truncated
 
         replay_buffer.append((state, action, reward, next_state, done))
@@ -121,6 +123,10 @@ def train_q_learning(env, max_timesteps, alpha, tau, gamma, epsilon, epsilon_dec
 
                 target = munchausen_reward + (0.0 if d else gamma * soft_v_next)
                 Q[s, a] += alpha * (target - Q[s, a])
+
+        if total_timesteps % 1000 == 0:
+            avg_reward = evaluate_agent(Q, env)
+            wandb.log({"avg_return_mrl": avg_reward}, step=total_timesteps)
 
         state = next_state
         total_timesteps += 1
@@ -142,7 +148,7 @@ def train_q_learning(env, max_timesteps, alpha, tau, gamma, epsilon, epsilon_dec
 
 
 def train_q_learning_without_mrl(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
-                                 buffer_size=50000, batch_size=64):
+                                 buffer_size=50000, batch_size=64, noise_std=0.5):
     state_size = env.observation_space.n
     action_size = env.action_space.n
     Q = np.zeros((state_size, action_size))
@@ -163,6 +169,7 @@ def train_q_learning_without_mrl(env, max_timesteps, alpha, gamma, epsilon, epsi
             action = np.argmax(Q[state])
 
         next_state, reward, terminated, truncated, _ = env.step(action)
+        # reward += np.random.normal(loc=0.0, scale=noise_std)
         done = terminated or truncated
 
         replay_buffer.append((state, action, reward, next_state, done))
@@ -172,6 +179,10 @@ def train_q_learning_without_mrl(env, max_timesteps, alpha, gamma, epsilon, epsi
             for s, a, r, s_next, d in batch:
                 target = r + (0.0 if d else gamma * np.max(Q[s_next]))
                 Q[s, a] += alpha * (target - Q[s, a])
+
+        if total_timesteps % 1000 == 0:
+            avg_reward = evaluate_agent(Q, env)
+            wandb.log({"avg_return_vanilla": avg_reward, "timestep_vanilla": total_timesteps})
 
         total_timesteps += 1
         episode_reward += reward
@@ -199,25 +210,36 @@ def softmax_probs(q_vals, entropy_tau):
     return probs_tensor.cpu().numpy()
 
 
-def evaluate_agent(Q, env, episodes=100, gif_path="frozenlake_qlearning_20x20.gif", tau=0.03):
+def evaluate_agent(Q, env, episodes=100, is_save_gif=False, gif_path="frozenlake_qlearning.gif", step=None,
+                   prefix="eval"):
     total_rewards = 0
-    for _ in range(episodes):
+    for i in range(episodes):
         state, _ = env.reset()
         done = False
+        episode_reward = 0
         while not done:
-            action_probs = softmax_probs(Q[state], tau)
-            action = np.random.choice(len(action_probs), p=action_probs)
+            action = int(np.argmax(Q[state]))
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
-            total_rewards += reward
-    save_gif(Q, env, filename=gif_path, tau=tau)
-    return total_rewards / episodes
+            episode_reward += reward
+
+        total_rewards += episode_reward
+
+        if step is not None:
+            wandb.log({f"{prefix}/reward": episode_reward}, step=step + i)
+
+    avg_return = total_rewards / episodes
+
+    if is_save_gif:
+        save_gif(Q, env, filename=gif_path)
+
+    return avg_return
 
 
 def save_gif(Q, env, filename="frozenlake_qlearning.gif", max_steps=100, tau=0.03):
     frames = []
     state, _ = env.reset()
-    filename = Path("frozen-lake-plots") / f"frozenlake_qlearning{int(np.sqrt(env.observation_space.n))}.gif"
+    filename = Path("frozen-lake-plots") / f"{filename.rstrip('.gif')}_{int(np.sqrt(env.observation_space.n))}x{int(np.sqrt(env.observation_space.n))}.gif"
 
     for _ in range(max_steps):
         frame = env.render()
@@ -236,24 +258,22 @@ def compute_avg_gap(Q):
     return np.mean(np.max(Q, axis=1) - np.partition(Q, -2, axis=1)[:, -2])
 
 
-def print_policy(Q, env, tau=0.03, action_symbols=None):
+def print_policy(Q, env, action_symbols=None):
     nrow = env.unwrapped.nrow
     ncol = env.unwrapped.ncol
-    num_actions = Q.shape[1]
 
-    print("\nSoftmax Policy π(a|s) for each state (greedy action shown):\n")
+    print("\nGreedy Policy π(a|s) for each state:\n")
 
     for i in range(nrow):
         row = ""
         for j in range(ncol):
             state = i * ncol + j
-            probs = softmax_probs(Q[state], tau)
-            best_action = np.argmax(probs)
+            best_action = np.argmax(Q[state])
             if action_symbols:
                 action_str = action_symbols[best_action]
             else:
                 action_str = str(best_action)
-            row += f"{action_str}({probs[best_action]:.2f})\t"
+            row += f"{action_str}\t"
         print(row)
 
 
@@ -263,6 +283,70 @@ def compute_avg_action_gap(Q):
     second_best_q = sorted_q[:, -2]
     gap = max_q - second_best_q
     return np.mean(gap)
+
+
+def plot_max_q_heatmaps(Q_mrl, Q_vanilla, env, save_dir="frozen-lake-plots", filename="max_q_comparison.png"):
+    nrow = env.unwrapped.nrow
+    ncol = env.unwrapped.ncol
+
+    max_q_mrl = np.max(Q_mrl, axis=1).reshape(nrow, ncol)
+    max_q_vanilla = np.max(Q_vanilla, axis=1).reshape(nrow, ncol)
+
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+
+    im0 = axs[0].imshow(max_q_mrl, cmap="viridis", origin="upper")
+    axs[0].set_title("MRL Max Q-values")
+    axs[0].set_xticks(range(ncol))
+    axs[0].set_yticks(range(nrow))
+    plt.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
+
+    im1 = axs[1].imshow(max_q_vanilla, cmap="viridis", origin="upper")
+    axs[1].set_title("Vanilla Max Q-values")
+    axs[1].set_xticks(range(ncol))
+    axs[1].set_yticks(range(nrow))
+    plt.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    save_path = Path(save_dir) / filename
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Saved side-by-side max Q-value heatmaps: {save_path}")
+
+
+def plot_q_table_heatmaps(Q_mrl, Q_vanilla, env, save_dir="frozen-lake-plots", prefix="qtable"):
+    nrow = env.unwrapped.nrow
+    ncol = env.unwrapped.ncol
+    n_actions = Q_mrl.shape[1]
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    action_names = ["←", "↓", "→", "↑"]
+
+    for action in range(n_actions):
+        fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+
+        mrl_vals = Q_mrl[:, action].reshape(nrow, ncol)
+        vanilla_vals = Q_vanilla[:, action].reshape(nrow, ncol)
+
+        im0 = axs[0].imshow(mrl_vals, cmap="coolwarm", origin="upper")
+        axs[0].set_title(f"MRL Q-values for action {action_names[action]}")
+        fig.colorbar(im0, ax=axs[0])
+
+        im1 = axs[1].imshow(vanilla_vals, cmap="coolwarm", origin="upper")
+        axs[1].set_title(f"Vanilla Q-values for action {action_names[action]}")
+        fig.colorbar(im1, ax=axs[1])
+
+        for ax in axs:
+            ax.set_xticks(range(ncol))
+            ax.set_yticks(range(nrow))
+
+        plt.tight_layout()
+        save_path = save_dir / f"{prefix}_action{action}_{action_names[action]}.png"
+        plt.savefig(save_path)
+        plt.close()
+        print(f"Saved Q-table heatmap with colorbar: {save_path}")
 
 
 def plot_action_gap_lines(Q_mrl, Q_vanilla, env, plotname="action_gap_lineplot"):
@@ -326,18 +410,29 @@ def main():
     # seed = 42
     # set_seed(seed)
 
-    wandb.init(project="frozenlake-cfn", name="MRL-true-vs-pseudo-bonues", mode="disabled")
+    wandb.init(project="frozenlake-cfn", name="MRL-true-vs-pseudo-bonues")
 
     map = [
-        "SFFFFFFF",
+        "SHFFFFFF",
+        "FFFFFHFF",
         "FFFFFFFF",
         "FFFFFFFF",
+        "FFHFFFFF",
         "FFFFFFFF",
-        "FFFFFFFF",
-        "FFFFFFFF",
-        "FFFFFFFF",
-        "FFFFFFFG",
+        "FFFFFHFF",
+        "FFFHFFFG",
     ]
+
+    # map = [
+    #     "SFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFG",
+    # ]
 
     # map = [
     #     "SFFFF",
@@ -357,8 +452,6 @@ def main():
     #     "FFFFFHFF",
     #     "FFFHFFFG",
     # ]
-
-
 
     # map = [
     #     "SFFFFFFFFFFF",
@@ -400,24 +493,26 @@ def main():
         env=env,
         batch_size=128,
         max_timesteps=50000,
-        alpha=1.0,
+        alpha=0.5,
         gamma=0.99,
         epsilon=1.0,
         epsilon_decay=0.999,
         epsilon_min=0.05,
         tau=0.03,
         alpha_m=0.9,
-        lo=-1.0
+        lo=-1.0,
+        noise_std=0.1
     )
 
     Q_vanilla, true_counts_vanilla = train_q_learning_without_mrl(
         env=env,
         max_timesteps=50000,
-        alpha=1.0,
+        alpha=0.9,
         gamma=0.99,
         epsilon=1.0,
         epsilon_decay=0.999,
-        epsilon_min=0.05
+        epsilon_min=0.05,
+        noise_std=0.1
     )
 
     gap_mrl = compute_avg_action_gap(Q_mrl)
@@ -435,8 +530,13 @@ def main():
     for a in range(env.action_space.n):
         print(f"Action {a}: {Q_mrl[0, a]:.4f}")
 
-    avg_reward = evaluate_agent(Q_mrl, env)
-    print(f"\nAverage evaluation reward over 100 episodes: {avg_reward:.2f}")
+    noise = np.random.normal(0, 0.05, size=Q_mrl.shape)
+    avg_reward = evaluate_agent(Q_mrl+noise, env, is_save_gif=True)
+    print(f"\nAverage evaluation reward over 100 episodes (MRL): {avg_reward:.2f}")
+
+    noise = np.random.normal(0, 0.05, size=Q_vanilla.shape)
+    avg_reward = evaluate_agent(Q_vanilla+noise, env, is_save_gif=True, gif_path="vanilla.gif")
+    print(f"\nAverage evaluation reward over 100 episodes (Vanilla): {avg_reward:.2f}")
 
     plot_true_vs_munchausen_bonus_heatmap(
         Q=Q_mrl,
@@ -447,19 +547,23 @@ def main():
         env=env,
         plotname="munchausen_vs_true_bonus"
     )
-    # TODO: add heatmap for Q_vaniila
-    # plot_munchausen_heatmap(Q_mrl, env, tau=0.05, alpha_m=0.3, lo=-0.1, plotname="munchausen_heatmap_run1")
+
+    plot_q_table_heatmaps(Q_mrl, Q_vanilla, env, prefix="qtable_mrl_vs_vanilla")
+
+    plot_max_q_heatmaps(Q_mrl, Q_vanilla, env)
 
     print(true_counts.reshape(int(np.sqrt(len(true_counts))), int(np.sqrt(len(true_counts)))))
+    print(true_counts_vanilla.reshape(int(np.sqrt(len(true_counts_vanilla))), int(np.sqrt(len(true_counts_vanilla)))))
 
-    # action_symbols = {
-    #     0: '←',
-    #     1: '↓',
-    #     2: '→',
-    #     3: '↑',
-    # }
-    #
-    # print_policy(Q, env, tau=0.03, action_symbols=action_symbols)
+    action_symbols = {
+        0: '←',
+        1: '↓',
+        2: '→',
+        3: '↑',
+    }
+
+    print_policy(Q_mrl, env, action_symbols=action_symbols)
+    print_policy(Q_vanilla, env, action_symbols=action_symbols)
 
 
 if __name__ == "__main__":
