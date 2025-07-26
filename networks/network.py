@@ -35,7 +35,12 @@ class Actor(nn.Module):
         """
         x = self.relu(self.fc1(obs))
         mu = self.fc_mu(x)
-        std = self.softplus(self.fc_std(x))
+
+        log_std_min = -20
+        log_std_max = 2
+        log_std = self.fc_std(x)
+        log_std = torch.clamp(log_std, min=log_std_min, max=log_std_max)
+        std = torch.exp(log_std)
 
         dist = torch.distributions.Normal(mu, std)
         action = dist.rsample()

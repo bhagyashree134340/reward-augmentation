@@ -13,7 +13,6 @@ from utils.plots import plot_validation_stats
 
 log = logging.getLogger(__name__)
 
-
 # TODO: add an output dir
 from pathlib import Path
 import numpy as np
@@ -24,7 +23,6 @@ from hydra.core.hydra_config import HydraConfig
 def evaluate(actor, env, current_timestep, max_steps, path=None, device=None):
     env.training = False
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     eval_data = evaluate_policy(actor, env, num_episodes=10, max_steps=max_steps)
 
@@ -97,7 +95,6 @@ def evaluate_cfn_bonus_generalization(cfn, env, buffer, num_samples=1000, device
     """
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     # TODO: should i set it to eval mode?
 

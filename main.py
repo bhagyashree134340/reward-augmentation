@@ -120,9 +120,11 @@ def main(cfg: DictConfig):
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
+    rew_aug = "cfn" if cfg.agent.cfn else "rnd" if cfg.agent.rnd else "mrl" if cfg.agent.mrl else "vanilla"
+
     wandb.init(
         project="sac-reward-aug",
-        name=f"{cfg.agent.id}_{cfg.env.id}_cfn_{cfg.agent.cfn}",
+        name=f"{cfg.agent.id}_{cfg.env.id}_{rew_aug}",
         config=dict(cfg),
         reinit=True
     )

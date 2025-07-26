@@ -16,11 +16,24 @@ class SACMRLAgent(SACAgent):
         not_done = 1 - done_batch.unsqueeze(-1).float()
         ent_coef = self.log_ent_coef.exp()
 
+        wandb.log({
+            "action/mean": act_batch.mean().item(),
+            "action/std": act_batch.std().item(),
+        }, step=current_step)
+
         with torch.no_grad():
             _, log_pi = self.actor(obs_batch)
-            munchausen_term = torch.clamp(self.tau_m * log_pi, min=self.lo, max=0.0)
+
+            action_log_probs = log_pi.sum(dim=-1, keepdim=True)
+            munchausen_term = torch.clamp(self.tau_m * action_log_probs, min=self.lo, max=0.0)
 
             r_mun = rew_batch.unsqueeze(-1) + self.alpha_m * munchausen_term
+
+        wandb.log({
+            "log_pi": action_log_probs.mean().item(),
+            "r_mun": r_mun.mean().item(),
+            "bonus_term": munchausen_term.mean().item()
+        }, step=current_step)
 
         with torch.no_grad():
             next_action, next_log_prob = self.actor_target(next_obs_batch)
@@ -29,9 +42,8 @@ class SACMRLAgent(SACAgent):
             q_target_min = torch.min(q1_target_val, q2_target_val)
 
             q_target = r_mun + self.gamma * not_done * (
-                q_target_min - ent_coef * next_log_prob.sum(dim=-1, keepdim=True)
+                    q_target_min - ent_coef * next_log_prob.sum(dim=-1, keepdim=True)
             )
-
 
         q_losses = []
         for q_func, q_opt in [(self.q1, self.q1_optimizer), (self.q2, self.q2_optimizer)]:
@@ -41,7 +53,6 @@ class SACMRLAgent(SACAgent):
             q_loss.backward()
             q_opt.step()
             q_losses.append(q_loss.item())
-
 
         new_action, new_log_prob = self.actor(obs_batch)
         q1_new = self.q1(obs_batch, new_action)
@@ -54,12 +65,10 @@ class SACMRLAgent(SACAgent):
         actor_loss.backward()
         self.actor_optimizer.step()
 
-
         ent_coef_loss = -(self.log_ent_coef.exp() * (new_log_prob.detach() + self.target_entropy)).mean()
         self.ent_coef_optimizer.zero_grad()
         ent_coef_loss.backward()
         self.ent_coef_optimizer.step()
-
 
         polyak_update(self.q1.parameters(), self.q1_target.parameters(), self.tau)
         polyak_update(self.q2.parameters(), self.q2_target.parameters(), self.tau)

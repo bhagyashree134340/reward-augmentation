@@ -51,7 +51,7 @@ class SACAgent:
         self.gamma = gamma
         self.batch_size = batch_size
         self.tau = tau
-        self.target_entropy = -np.prod(env.action_space.shape).item()  #target_entropy  # -np.prod(
+        self.target_entropy = -np.prod(env.action_space.shape).item()  # target_entropy  # -np.prod(
         # env.action_space.shape).item()
         # self.target_entropy = -2
 
@@ -89,7 +89,7 @@ class SACAgent:
         self.q1_optimizer = optim.Adam(self.q1.parameters(), lr=lr)
         self.q2_optimizer = optim.Adam(self.q2.parameters(), lr=lr)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
-        self.ent_coef_optimizer = optim.Adam([self.log_ent_coef], lr=lr*0.1)
+        self.ent_coef_optimizer = optim.Adam([self.log_ent_coef], lr=lr * 0.1)
 
     def train(self, total_timesteps: int, max_episode_steps: int) -> None:
         """
@@ -153,7 +153,7 @@ class SACAgent:
             episode_step += 1
             current_timestep += 1
 
-            if done or episode_step >= max_episode_steps:
+            if done:
                 episode_lengths.append(episode_step)
                 episode_rewards.append(episode_return)
                 timesteps_on_ep_end.append(current_timestep)
@@ -176,11 +176,11 @@ class SACAgent:
                 episode_step = 0
                 episode_num += 1
 
-            # Save & evaluate periodically
             if current_timestep % 1000 == 0:
                 validate(self.actor, current_timestep)
 
-                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_episode_steps)
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep,
+                                                             max_episode_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)
