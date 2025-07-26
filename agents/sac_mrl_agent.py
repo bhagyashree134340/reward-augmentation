@@ -18,8 +18,7 @@ class SACMRLAgent(SACAgent):
 
         with torch.no_grad():
             _, log_pi = self.actor(obs_batch)
-            munchausen_term = log_pi.gather(1, act_batch.long()) 
-            munchausen_term = torch.clamp(self.tau_m * munchausen_term, min=self.lo, max=0.0)
+            munchausen_term = torch.clamp(self.tau_m * log_pi, min=self.lo, max=0.0)
 
             r_mun = rew_batch.unsqueeze(-1) + self.alpha_m * munchausen_term
 
