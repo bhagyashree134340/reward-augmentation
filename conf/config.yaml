@@ -1,7 +1,9 @@
 defaults:
   - agent: sac_agent #sac_agent #td3_agent
-  - env: fetch
+  - env: half_cheetah
   - cfn: cfn
+  - rnd: rnd
+  - mrl: mrl
 
 seed: 42
 

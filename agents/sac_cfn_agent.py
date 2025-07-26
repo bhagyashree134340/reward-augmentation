@@ -78,24 +78,24 @@ class SACCFNAgent(SACAgent):
             avg_rewards.append(intrinsic_reward.item() + reward)
 
             if self.use_cfn_prior:
-                if current_timestep < 30_000 or current_timestep > 970_000:
-                    with torch.no_grad():
-                        obs = obs.to(self.cfn.device)
-                        if obs.ndim == 1:
-                            obs = obs.unsqueeze(0)
+                
+                with torch.no_grad():
+                    obs = obs.to(self.cfn.device)
+                    if obs.ndim == 1:
+                        obs = obs.unsqueeze(0)
 
-                        combined_out = self.cfn(obs, update_prior_stats=False)
-                        prior_out = self.cfn.prior(obs)
-                        output_norm = combined_out.norm(p=2, dim=1)
-                        prior_output_norm = prior_out.norm(p=2, dim=1)
-                        pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2)
+                    combined_out = self.cfn(obs, update_prior_stats=False)
+                    prior_out = self.cfn.prior(obs)
+                    output_norm = combined_out.norm(p=2, dim=1)
+                    prior_output_norm = prior_out.norm(p=2, dim=1)
+                    pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2)
 
-                        wandb.log({
-                            "pseudocounts-intr": 1 / (intrinsic_reward**2 + 1e-8).item(),
-                            "prior_output_norm": prior_output_norm.cpu().numpy(),
-                            "output_norm": output_norm.cpu().numpy(),
-                            "pseudocount_estimate": pseudocount_estimate.cpu().numpy(),
-                        }, step=current_timestep)
+                    wandb.log({
+                        "pseudocounts-intr": 1 / (intrinsic_reward**2 + 1e-8).item(),
+                        "prior_output_norm": prior_output_norm.cpu().numpy(),
+                        "output_norm": output_norm.cpu().numpy(),
+                        "pseudocount_estimate": pseudocount_estimate.cpu().numpy(),
+                    }, step=current_timestep)
 
                 self.cfn(obs, update_prior_stats=True)
 
@@ -137,20 +137,23 @@ class SACCFNAgent(SACAgent):
 
                 # total_rew_batch = int_rew_batch + ext_rew_batch
 
-                total_rew_batch = torch.clamp(int_rew_batch + ext_rew_batch, min=-1.0, max=1.0)
+                total_rew_batch = int_rew_batch + ext_rew_batch
 
                 self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, tm_batch, current_timestep)
+                
 
-            obs_batch_bc, coin_flip_batch_bc, indices = self.cfn_buffer.sample_with_indices(
-                batch_size=self.cfn_cfg.cfn_batch_size
-            )
+            if self.cfn_buffer.size >= self.cfn_cfg.cfn_batch_size:
 
-            self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
-
-            if self.use_cfn_priority:
-                self.cfn_buffer.update_priorities(
-                    indices, obs_batch_bc, self.cfn, self.coin_flip_dim
+                obs_batch_bc, coin_flip_batch_bc, indices = self.cfn_buffer.sample_with_indices(
+                    batch_size=self.cfn_cfg.cfn_batch_size
                 )
+
+                self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
+
+                if self.use_cfn_priority:
+                    self.cfn_buffer.update_priorities(
+                        indices, obs_batch_bc, self.cfn, self.coin_flip_dim
+                    )
 
             obs = next_obs
             episode_return += reward + intrinsic_reward

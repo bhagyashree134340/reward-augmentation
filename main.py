@@ -8,6 +8,8 @@ from omegaconf import DictConfig
 
 from agents.sac_agent import SACAgent
 from agents.sac_cfn_agent import SACCFNAgent
+from agents.sac_mrl_agent import SACMRLAgent
+from agents.sac_rnd_agent import SACRNDAgent
 from agents.td3 import TD3Agent
 from agents.td3_cfn import TD3CFNAgent
 from utils.env_wrapper import make_env
@@ -35,6 +37,32 @@ def create_agent(cfg: DictConfig, env):
                 target_entropy=cfg.agent.target_entropy,
                 cfn_cfg=cfg.cfn,
                 eval_env=eval_env
+            )
+        elif cfg.agent.rnd:
+            print("SAC RND agent")
+            agent = SACRNDAgent(
+                env=env,
+                eval_env=eval_env,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                maxlen=cfg.agent.replay_buffer_size,
+                target_entropy=cfg.agent.target_entropy,
+                rnd_cfg=cfg.rnd  
+        )
+        elif cfg.agent.mrl:
+            print("SAC MRL agent")
+            agent = SACMRLAgent(
+                env=env,
+                eval_env=eval_env,
+                gamma=cfg.agent.discount_factor,
+                tau=cfg.agent.tau,
+                batch_size=cfg.agent.batch_size,
+                maxlen=cfg.agent.replay_buffer_size,
+                target_entropy=cfg.agent.target_entropy,
+                alpha=cfg.mrl.alpha,
+                tau_m=cfg.mrl.tau,
+                lo=cfg.mrl.lo,
             )
         else:
             agent = SACAgent(
@@ -88,12 +116,10 @@ def main(cfg: DictConfig):
     # Set random seed
     # set_seed(cfg.seed)
 
-    # Create output dirs
     output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize WandB
     wandb.init(
         project="sac-reward-aug",
         name=f"{cfg.agent.id}_{cfg.env.id}_cfn_{cfg.agent.cfn}",
@@ -101,14 +127,12 @@ def main(cfg: DictConfig):
         reinit=True
     )
 
-    # Create environment(s)
     env = make_env(cfg.env.id,
                    render_mode=cfg.env.render_mode,
                    max_episode_steps=cfg.env.max_episode_steps)
 
     agent = create_agent(cfg, env)
 
-    # Train the agent
     start_time = time.time()
     agent.train(
         total_timesteps=cfg.agent.num_env_steps,
