@@ -39,11 +39,13 @@ def update_cfn_network(cfn, optimizer, obs_batch, coin_flip_batch):
 
 
 def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
-                     cfn, cfn_buffer, cfn_optimizer, coin_flip_dim):
+                     cfn, cfn_buffer, cfn_optimizer, coin_flip_dim, buffer_size):
     state_size = env.observation_space.n
     action_size = env.action_space.n
     Q = np.zeros((state_size, action_size))
     true_counts = np.zeros(state_size, dtype=np.int32)
+
+    replay_buffer = deque(maxlen=buffer_size)
 
     total_timesteps = 0
     episode_reward = 0
@@ -77,6 +79,8 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
 
         _ = cfn(obs_tensor, update_prior_stats=True)
 
+        replay_buffer.append((state, action, reward, intrinsic_reward, next_state, done))
+
         coin_flip = get_coin_flips(coin_flip_dim)
         cfn_buffer.add(
             obs=obs_tensor.cpu().numpy().squeeze(),
@@ -84,8 +88,14 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
             priority=1.0
         )
 
-        best_next_action = np.argmax(Q[next_state])
-        Q[state, action] += alpha * (total_reward + gamma * Q[next_state, best_next_action] - Q[state, action])
+        if len(replay_buffer) >= 10000:
+            batch_size = 64
+            sampled_transitions = random.sample(replay_buffer, batch_size)
+
+            for s, a, r, i_r, s_next, d in sampled_transitions:
+                best_next_action = np.argmax(Q[s_next])
+                target = r + i_r + (0.0 if d else gamma * Q[s_next, best_next_action])
+                Q[s, a] += alpha * (target - Q[s, a])
 
         obs_batch_bc, coin_flip_batch_bc, indices = cfn_buffer.sample_with_indices(batch_size=1024)
         update_cfn_network(cfn, cfn_optimizer, obs_batch_bc, coin_flip_batch_bc)
@@ -349,16 +359,27 @@ def main():
     # set_seed(seed)
 
     wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts")
+
     map = [
-        "SFFFFFFH",
-        "HHHHFFFH",
-        "FFFFFHFF",
-        "FGFFFFFH",
-        "FHFFFHFF",
-        "FHFFFFHF",
-        "FFFFHHHF",
-        "HHHHHFFG",
-    ]
+                "SFFFFFFH",
+                "HHHHFFFH",
+                "FFFFFHFF",
+                "FHFFFFFH",
+                "FHFFFHFF",
+                "FHFFFFHF",
+                "FFFFHHHF",
+                "HHHHHFFG",
+            ]
+    # map = [
+    #     "SFFFFFFH",
+    #     "HHHHFFFH",
+    #     "FFFFFHFF",
+    #     "FGFFFFFH",
+    #     "FHFFFHFF",
+    #     "FHFFFFHF",
+    #     "FFFFHHHF",
+    #     "HHHHHFFG",
+    # ]
     #
     # map = [
     #     "SFFFFFFFFFFF",
@@ -413,12 +434,13 @@ def main():
         alpha=0.8,
         gamma=0.95,
         epsilon=1.0,
-        epsilon_decay=0.995,
+        epsilon_decay=0.9995,
         epsilon_min=0.1,
         cfn=cfn,
         cfn_buffer=cfn_buffer,
         cfn_optimizer=cfn_optimizer,
-        coin_flip_dim=coin_flip_dim
+        coin_flip_dim=coin_flip_dim,
+        buffer_size=50000
     )
 
     Q_vanilla, true_counts_vanilla = train_q_learning_vanilla(
