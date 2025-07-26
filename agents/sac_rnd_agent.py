@@ -7,6 +7,8 @@ from RND.rnd import RNDModel, RewardForwardFilter
 from gymnasium.wrappers.utils import RunningMeanStd
 import torch.nn.functional as F
 from agents.sac_agent import SACAgent
+from utils.evaluate import evaluate
+from utils.validate import validate
 
 log = logging.getLogger(__name__)
 
@@ -101,3 +103,11 @@ class SACRNDAgent(SACAgent):
                 obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
                 episode_return = 0
                 episode_step = 0
+
+            if current_timestep % 1000 == 0:
+                validate(self.actor, current_timestep)
+
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_episode_steps)
+                self.eval_envsteps.append(eval_envstep)
+                self.eval_means.append(eval_mean)
+                self.eval_stds.append(eval_std)
