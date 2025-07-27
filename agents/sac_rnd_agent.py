@@ -69,10 +69,13 @@ class SACRNDAgent(SACAgent):
             done=np.array(done, dtype=np.float32)
 )
 
-            forward_loss = F.mse_loss(pred, target.detach())
-            self.rnd_optimizer.zero_grad()
-            forward_loss.backward()
-            self.rnd_optimizer.step()
+            mask_prob = self.rnd_cfg.rnd_mask_prob if hasattr(self.rnd_cfg, "rnd_mask_prob") else 0.25
+            mask = torch.rand_like(pred[:, 0]) < mask_prob 
+            if mask.sum() > 0:
+                forward_loss = F.mse_loss(pred[mask], target.detach()[mask])
+                self.rnd_optimizer.zero_grad()
+                forward_loss.backward()
+                self.rnd_optimizer.step()
 
             if self.buffer.get_stored_size() >= self.batch_size:
                 batch = self.buffer.sample(self.batch_size)
