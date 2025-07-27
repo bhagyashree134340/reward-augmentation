@@ -67,6 +67,9 @@ class SACCFNAgent(SACAgent):
                 action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
 
             next_obs_np, reward, terminated, truncated, info = self.env.step(action)
+
+            # wandb.log({"reward dist": info["reward_dist"], "reward control": info["reward_ctrl"]},
+            #           step=current_timestep)
             next_obs = torch.tensor(next_obs_np, dtype=torch.float32, device=self.device)
             done = terminated or truncated
 
@@ -78,7 +81,7 @@ class SACCFNAgent(SACAgent):
             avg_rewards.append(intrinsic_reward.item() + reward)
 
             if self.use_cfn_prior:
-                
+
                 with torch.no_grad():
                     obs = obs.to(self.cfn.device)
                     if obs.ndim == 1:
@@ -91,7 +94,7 @@ class SACCFNAgent(SACAgent):
                     pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2)
 
                     wandb.log({
-                        "pseudocounts-intr": 1 / (intrinsic_reward**2 + 1e-8).item(),
+                        "pseudocounts-intr": 1 / (intrinsic_reward ** 2 + 1e-8).item(),
                         "prior_output_norm": prior_output_norm.cpu().numpy(),
                         "output_norm": output_norm.cpu().numpy(),
                         "pseudocount_estimate": pseudocount_estimate.cpu().numpy(),
@@ -140,7 +143,6 @@ class SACCFNAgent(SACAgent):
                 total_rew_batch = int_rew_batch + ext_rew_batch
 
                 self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, tm_batch, current_timestep)
-                
 
             if self.cfn_buffer.size >= self.cfn_cfg.cfn_batch_size:
 
