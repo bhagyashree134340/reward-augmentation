@@ -75,33 +75,34 @@ class RNDModel(nn.Module):
         
         c, h, w = obs_shape
         
+        # MiniGrid-specific CNN architecture (same as your DDQN)
         # Target network (frozen, random weights)
         self.target = nn.Sequential(
-            self._layer_init(nn.Conv2d(c, 32, kernel_size=8, stride=4, padding=0)),
+            self._layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1)),
             nn.LeakyReLU(),
-            self._layer_init(nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0)),
+            self._layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)),
             nn.LeakyReLU(),
-            self._layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0)),
+            self._layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)),
             nn.LeakyReLU(),
+            nn.AdaptiveAvgPool2d((2, 2)),  # Always reduce to 2x2
             nn.Flatten(),
         )
         
-        # Calculate the size after convolutions
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, c, h, w)
-            conv_output_size = self.target(dummy_input).shape[1]
+        # Feature size is always 64 * 2 * 2 = 256 for MiniGrid
+        conv_output_size = 64 * 2 * 2
         
         # Add final layers to target
         self.target.add_module('fc', self._layer_init(nn.Linear(conv_output_size, hidden_size)))
         
-        # Predictor network (trainable)
+        # Predictor network (trainable) - same architecture
         self.predictor = nn.Sequential(
-            self._layer_init(nn.Conv2d(c, 32, kernel_size=8, stride=4, padding=0)),
+            self._layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1)),
             nn.LeakyReLU(),
-            self._layer_init(nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0)),
+            self._layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)),
             nn.LeakyReLU(),
-            self._layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0)),
+            self._layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)),
             nn.LeakyReLU(),
+            nn.AdaptiveAvgPool2d((2, 2)),
             nn.Flatten(),
             self._layer_init(nn.Linear(conv_output_size, hidden_size)),
             nn.ReLU(),
@@ -133,9 +134,10 @@ class RNDModel(nn.Module):
 
 
 class DQN_RNDAgent:
-    def __init__(self, env, eval_env, dqn_cfg, rnd_cfg):
+    def __init__(self, env, eval_env, dqn_cfg, rnd_cfg, env_name):
         self.env = env
         self.eval_env = eval_env
+        self.env_name = env_name  # Store environment name
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Get observation shape from environment
@@ -317,7 +319,7 @@ class DQN_RNDAgent:
                 try:
                     from evaluation_utils import evaluate_agent_performance
                     eval_metrics = evaluate_agent_performance(
-                        self, "MiniGrid-DoorKey-5x5-v0", num_episodes=5, max_steps=max_episode_steps
+                        self, num_episodes=5, max_steps=max_episode_steps
                     )
                     wandb.log({
                         "eval/mean_reward": eval_metrics['mean_reward'],
@@ -358,12 +360,12 @@ class DQN_RNDAgent:
             from evaluation_utils import full_evaluation, quick_test
             
             # Quick test first
-            quick_metrics = quick_test(agent=self, env_name="MiniGrid-DoorKey-5x5-v0")
+            quick_metrics = quick_test(agent=self)
             
             # Full evaluation if agent shows promise
             if quick_metrics['success_rate'] > 0.2:  # If >20% success rate
                 print("Agent shows promise! Running full evaluation...")
-                full_metrics, episode_info = full_evaluation(agent=self, env_name="MiniGrid-DoorKey-5x5-v0")
+                full_metrics, episode_info = full_evaluation(agent=self)
             else:
                 print("Agent needs more training, but creating a demo GIF anyway...")
                 from evaluation_utils import create_evaluation_gif
@@ -406,14 +408,15 @@ from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
 
 def main():
     # Initialize wandb
-    wandb.init(project="dqn-rnd", name="rnd_experiment", mode='disabled')
+    wandb.init(project="dqn-rnd", name="rnd_experiment")
+    ENV_NAME = "MiniGrid-DoorKey-5x5-v0"
 
     # Create environment
-    env = gym.make("MiniGrid-DoorKey-5x5-v0", render_mode="rgb_array")
+    env = gym.make(ENV_NAME, render_mode="rgb_array")
     env = FullyObsWrapper(env)
     env = ImgObsWrapper(env)
 
-    eval_env = gym.make("MiniGrid-DoorKey-5x5-v0", render_mode="rgb_array")
+    eval_env = gym.make(ENV_NAME, render_mode="rgb_array")
     eval_env = FullyObsWrapper(eval_env)
     eval_env = ImgObsWrapper(eval_env)
     
@@ -445,6 +448,7 @@ def main():
     # Create agent
     agent = DQN_RNDAgent(
         env=env,
+        env_name = ENV_NAME,
         eval_env=eval_env,
         dqn_cfg=dqn_cfg,
         rnd_cfg=rnd_cfg

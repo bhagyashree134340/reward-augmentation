@@ -1,8 +1,6 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from utils.evaluation_utils import create_evaluation_gif, evaluate_agent_performance, full_evaluation, quick_test
 import time
 import torch
 import torch.nn as nn
@@ -35,9 +33,10 @@ log = logging.getLogger(__name__)
 
 
 class DQN_CFNAgent:
-    def __init__(self, env, eval_env, dqn_cfg, cfn_cfg):
+    def __init__(self, env, eval_env, env_name, dqn_cfg, cfn_cfg):
         self.env = env
         self.eval_env = eval_env
+        self.env_name = env_name  # Store environment name for evaluation utils
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Get observation shape from environment
@@ -141,29 +140,37 @@ class DQN_CFNAgent:
             total_reward = reward + intrinsic_reward.item()
             avg_rewards.append(total_reward)
 
-            # Reduce logging frequency and computation
-            if current_timestep % 10000 == 0 and current_timestep > 0:  # Log every 10k steps instead of every step
+            # More frequent CFN logging to debug issues
+            if current_timestep % 5000 == 0 and current_timestep > 0:  # Log every 5k steps
                 with torch.no_grad():
                     combined_out = self.cfn(obs_tensor, update_prior_stats=False)
                     prior_out = self.cfn.prior(obs_tensor)
                     output_norm = combined_out.norm(p=2, dim=1)
                     prior_output_norm = prior_out.norm(p=2, dim=1)
-                    pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2)
-
+                    pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2 + 1e-8)
+                    
+                    # Also log epsilon for debugging
                     wandb.log({
-                        "pseudocounts-intr": 1 / (intrinsic_reward ** 2 + 1e-8).item(),
-                        "prior_output_norm": prior_output_norm.cpu().item(),
-                        "output_norm": output_norm.cpu().item(),
-                        "pseudocount_estimate": pseudocount_estimate.cpu().item(),
+                        "cfn/pseudocounts-intr": 1 / (intrinsic_reward.item() ** 2 + 1e-8),
+                        "cfn/prior_output_norm": prior_output_norm.cpu().item(),
+                        "cfn/output_norm": output_norm.cpu().item(),
+                        "cfn/pseudocount_estimate": pseudocount_estimate.cpu().item(),
+                        "cfn/intrinsic_reward": intrinsic_reward.item(),
+                        "training/epsilon": epsilon,
+                        "training/external_reward": reward,
+                        "training/total_reward_avg": np.mean(avg_rewards) if avg_rewards else 0,
                     }, step=current_timestep)
 
             self.cfn(obs_tensor, update_prior_stats=True)
 
             if current_timestep % 1000 == 0:
                 wandb.log({
-                    "ext_reward": reward,
-                    "int_reward": intrinsic_reward.item(),
-                    "averaged_rewards": np.average(avg_rewards),
+                    "rewards/ext_reward": reward,
+                    "rewards/int_reward": intrinsic_reward.item(),
+                    "rewards/total_reward": total_reward,
+                    "rewards/averaged_total": np.mean(avg_rewards) if avg_rewards else 0,
+                    "training/epsilon": epsilon,
+                    "training/episode_num": episode_num,
                 }, step=current_timestep)
                 avg_rewards.clear()
 
@@ -176,10 +183,12 @@ class DQN_CFNAgent:
                 batch = random.sample(self.replay_buffer, self.batch_size)
                 self.update(batch)
 
-            # Only update CFN periodically to reduce overhead
-            if self.cfn_buffer.size >= self.cfn_cfg.cfn_batch_size:  
+            # Update CFN every step for better learning
+            if self.cfn_buffer.size >= self.cfn_cfg.cfn_batch_size:  # Remove the % 4 condition
                 obs_batch_bc, coin_flip_batch_bc, indices = self.cfn_buffer.sample_with_indices(self.cfn_cfg.cfn_batch_size)
+
                 self.update_cfn(obs_batch_bc, coin_flip_batch_bc)
+
                 if self.use_cfn_priority:
                     self.cfn_buffer.update_priorities(indices, obs_batch_bc, self.cfn, self.coin_flip_dim)
 
@@ -190,24 +199,6 @@ class DQN_CFNAgent:
 
             if current_timestep % self.target_update_freq == 0:
                 self.target_q_net.load_state_dict(self.q_net.state_dict())
-
-            # Add evaluation during training
-            if current_timestep % 10000 == 0 and current_timestep > 0:
-                print(f"\n--- Evaluation at step {current_timestep} ---")
-                # Quick evaluation without GIF to save time
-            
-                eval_metrics = evaluate_agent_performance(
-                    self, "MiniGrid-DoorKey-5x5-v0", num_episodes=5, max_steps=max_episode_steps
-                )
-                # Log to wandb if enabled
-                try:
-                    wandb.log({
-                        "eval/mean_reward": eval_metrics['mean_reward'],
-                        "eval/success_rate": eval_metrics['success_rate'],
-                        "eval/mean_length": eval_metrics['mean_length']
-                    }, step=current_timestep)
-                except:
-                    pass  # wandb might be disabled
 
             if done or episode_step >= max_episode_steps:
                 stats.episode_rewards.append(episode_return)
@@ -222,7 +213,7 @@ class DQN_CFNAgent:
 
                 log.info(
                     f"Episode {episode_num} | Steps: {episode_step} | "
-                    f"Return: {episode_return:.2f} | reward: {reward} | Total Timesteps: {current_timestep}"
+                    f"Return: {episode_return:.2f} | Total Timesteps: {current_timestep}"
                 )
 
                 obs_raw, _ = self.env.reset()
@@ -231,20 +222,54 @@ class DQN_CFNAgent:
                 episode_step = 0
                 episode_num += 1
 
+            # Add diagnostic logging - now uses agent's env_name
+            if current_timestep % 50000 == 0 and current_timestep > 0:
+                from evaluation_utils import diagnose_cfn_issues, debug_training_progress
+                diagnose_cfn_issues(self)
+                debug_training_progress(self)
+
+            # Add evaluation during training - more frequent - now uses agent's env_name
+            if current_timestep % 25000 == 0 and current_timestep > 0:
+                print(f"\n--- Evaluation at step {current_timestep} ---")
+                # Quick evaluation without GIF to save time
+                from evaluation_utils import evaluate_agent_performance
+                eval_metrics = evaluate_agent_performance(
+                    self, num_episodes=10, max_steps=max_episode_steps
+                )
+                # Log to wandb
+                wandb.log({
+                    "eval/mean_reward": eval_metrics['mean_reward'],
+                    "eval/success_rate": eval_metrics['success_rate'],
+                    "eval/mean_length": eval_metrics['mean_length'],
+                    "eval/std_reward": eval_metrics['std_reward'],
+                }, step=current_timestep)
+                
+                # Create a GIF if showing progress
+                if eval_metrics['success_rate'] > 0:
+                    print("🎉 Creating success GIF!")
+                    from evaluation_utils import create_evaluation_gif
+                    create_evaluation_gif(
+                        self, gif_path=f"progress_step_{current_timestep}.gif", 
+                        num_episodes=2, fps=3
+                    )  
+
         # Replace the old evaluation functions with new ones
         print("\n" + "="*50)
         print("TRAINING COMPLETED - FINAL EVALUATION")
         print("="*50)
         
+        from evaluation_utils import full_evaluation, quick_test
+        
         # Quick test first
-        quick_metrics = quick_test(agent=self, env_name="MiniGrid-DoorKey-5x5-v0")
+        quick_metrics = quick_test(agent=self)
         
         # Full evaluation if agent shows promise
         if quick_metrics['success_rate'] > 0.2:  # If >20% success rate
             print("Agent shows promise! Running full evaluation...")
-            full_metrics, episode_info = full_evaluation(agent=self, env_name="MiniGrid-DoorKey-5x5-v0")
+            full_metrics, episode_info = full_evaluation(agent=self)
         else:
             print("Agent needs more training, but creating a demo GIF anyway...")
+            from evaluation_utils import create_evaluation_gif
             create_evaluation_gif(self, gif_path="training_demo.gif", num_episodes=3)
 
     def update(self, batch):
@@ -292,14 +317,16 @@ class DQN_CFNAgent:
 from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
 
 def main1():
-    # Comment out wandb for faster training during testing
-    wandb.init(project="dqn", name="cfn", mode='disabled')
+    # CENTRALIZED ENVIRONMENT CONFIGURATION
+    ENV_NAME = "MiniGrid-DoorKey-5x5-v0"  # Change this line to switch environments
+    
+    wandb.init(project="dqn", name="cfn")  # Re-enable wandb logging
 
-    env = gym.make("MiniGrid-DoorKey-5x5-v0", render_mode="rgb_array")
+    env = gym.make(ENV_NAME, render_mode="rgb_array")
     env = FullyObsWrapper(env)
     env = ImgObsWrapper(env)
 
-    eval_env = gym.make("MiniGrid-DoorKey-5x5-v0", render_mode="rgb_array")
+    eval_env = gym.make(ENV_NAME, render_mode="rgb_array")
     eval_env = FullyObsWrapper(eval_env)
     eval_env = ImgObsWrapper(eval_env)
     max_episode_steps = 300
@@ -311,23 +338,24 @@ def main1():
     gamma = 0.99
     batch_size = 64
     replay_buffer_size = 50_000
-    target_update_freq = 500
+    target_update_freq = 1000  # Less frequent updates
 
-    # Reduced CFN parameters for faster training
-    cfn_coin_flip_dim = 10  # Reduced from 20
-    cfn_lr = 1e-4
-    cfn_replay_buffer_size = 100_000  # Reduced from 500k
-    cfn_batch_size = 256  # Reduced from 1024
-    learning_starts = 5000  # Reduced from 10k
+    # Better CFN parameters for learning
+    cfn_coin_flip_dim = 64  # Increased for better exploration
+    cfn_lr = 1e-3  # Higher learning rate
+    cfn_replay_buffer_size = 100_000
+    cfn_batch_size = 256
+    learning_starts = 1000  # Start learning earlier
     epsilon_start = 1.0
-    epsilon_end = 0.1
-    epsilon_decay = 0.995
+    epsilon_end = 0.05  # Higher final exploration
+    epsilon_decay = 0.9995  # Much slower decay
     use_cfn_prior = False
     use_cfn_priority = True
 
     agent = DQN_CFNAgent(
         env=env,
         eval_env=eval_env,
+        env_name=ENV_NAME,  # Pass environment name to agent
         dqn_cfg=type("DQNConfig", (), {
             "hidden_size": hidden_size,
             "lr": lr,

@@ -1,6 +1,3 @@
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import numpy as np
 import torch
 import gymnasium as gym
@@ -12,20 +9,22 @@ import matplotlib.pyplot as plt
 from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
 
 
-def create_evaluation_gif(agent, env_name="MiniGrid-DoorKey-5x5-v0", 
-                         max_steps=300, gif_path="agent_performance.gif", 
+def create_evaluation_gif(agent, max_steps=300, gif_path="agent_performance.gif", 
                          num_episodes=3, fps=2):
     """
     Create a GIF showing the agent's performance in the environment.
+    Uses the agent's stored environment name.
     
     Args:
-        agent: Trained DQN agent
-        env_name: Name of the MiniGrid environment
+        agent: Trained DQN agent (must have env_name attribute)
         max_steps: Maximum steps per episode
         gif_path: Path to save the GIF
         num_episodes: Number of episodes to record
         fps: Frames per second for the GIF
     """
+    
+    # Use the agent's environment name
+    env_name = agent.env_name
     
     # Create evaluation environment
     eval_env = gym.make(env_name, render_mode="rgb_array")
@@ -102,20 +101,22 @@ def create_evaluation_gif(agent, env_name="MiniGrid-DoorKey-5x5-v0",
     return episode_info
 
 
-def evaluate_agent_performance(agent, env_name="MiniGrid-DoorKey-5x5-v0", 
-                              num_episodes=10, max_steps=300):
+def evaluate_agent_performance(agent, num_episodes=10, max_steps=300):
     """
     Evaluate agent performance without creating GIF.
+    Uses the agent's stored environment name.
     
     Args:
-        agent: Trained DQN agent
-        env_name: Name of the MiniGrid environment
+        agent: Trained DQN agent (must have env_name attribute)
         num_episodes: Number of evaluation episodes
         max_steps: Maximum steps per episode
     
     Returns:
         dict: Evaluation metrics
     """
+    
+    # Use the agent's environment name
+    env_name = agent.env_name
     
     eval_env = gym.make(env_name, render_mode="rgb_array")
     eval_env = FullyObsWrapper(eval_env)
@@ -166,6 +167,7 @@ def evaluate_agent_performance(agent, env_name="MiniGrid-DoorKey-5x5-v0",
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
+    print(f"Environment: {env_name}")
     print(f"Episodes: {num_episodes}")
     print(f"Mean Reward: {metrics['mean_reward']:.2f} ± {metrics['std_reward']:.2f}")
     print(f"Mean Length: {metrics['mean_length']:.1f} ± {metrics['std_length']:.1f}")
@@ -214,10 +216,11 @@ def resize_frame(frame, target_size=(400, 400)):
     return np.array(img)
 
 
-def save_training_progress_gif(agent, env_name, save_dir="./gifs", 
+def save_training_progress_gif(agent, save_dir="./gifs", 
                               checkpoint_steps=[50000, 100000, 200000, 500000]):
     """
     Save GIFs at different training checkpoints to see learning progress.
+    Uses the agent's stored environment name.
     Call this function at different points during training.
     """
     os.makedirs(save_dir, exist_ok=True)
@@ -227,36 +230,144 @@ def save_training_progress_gif(agent, env_name, save_dir="./gifs",
     
     if current_step in checkpoint_steps:
         gif_path = os.path.join(save_dir, f"agent_step_{current_step}.gif")
-        create_evaluation_gif(agent, env_name, gif_path=gif_path, num_episodes=2)
+        create_evaluation_gif(agent, gif_path=gif_path, num_episodes=2)
 
 
-# Example usage functions:
-def quick_test(agent, env_name="MiniGrid-DoorKey-5x5-v0"):
-    """Quick test to see if agent is working."""
+def diagnose_cfn_issues(agent, num_samples=100):
+    """
+    Diagnose potential issues with CFN exploration.
+    Uses the agent's stored environment name.
+    """
+    print("\n" + "="*50)
+    print("CFN DIAGNOSTIC")
+    print("="*50)
+    
+    # Use the agent's environment name
+    env_name = agent.env_name
+    
+    # Sample some observations from the environment
+    env = gym.make(env_name, render_mode="rgb_array")
+    env = FullyObsWrapper(env)
+    env = ImgObsWrapper(env)
+    
+    intrinsic_rewards = []
+    output_norms = []
+    
+    for _ in range(num_samples):
+        obs_raw, _ = env.reset()
+        obs = agent.process_obs(obs_raw)
+        obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(agent.device)
+        
+        with torch.no_grad():
+            # Get CFN output
+            cfn_output = agent.cfn(obs_tensor, update_prior_stats=False)
+            output_norm = cfn_output.norm(p=2, dim=1).item()
+            
+            # Compute intrinsic reward
+            from CFN.priority_util import compute_intrinsic_reward
+            intrinsic_reward = compute_intrinsic_reward(
+                agent.coin_flip_dim,
+                torch.tensor(output_norm ** 2)
+            ).item()
+            
+            intrinsic_rewards.append(intrinsic_reward)
+            output_norms.append(output_norm)
+    
+    env.close()
+    
+    print(f"Environment: {env_name}")
+    print(f"Intrinsic Rewards - Mean: {np.mean(intrinsic_rewards):.4f}, Std: {np.std(intrinsic_rewards):.4f}")
+    print(f"Output Norms - Mean: {np.mean(output_norms):.4f}, Std: {np.std(output_norms):.4f}")
+    print(f"Min/Max Intrinsic: {np.min(intrinsic_rewards):.4f} / {np.max(intrinsic_rewards):.4f}")
+    
+    # Check if intrinsic rewards are too low/high
+    mean_intrinsic = np.mean(intrinsic_rewards)
+    if mean_intrinsic < 0.1:
+        print("⚠️  WARNING: Intrinsic rewards very low - agent might not explore enough")
+    elif mean_intrinsic > 10:
+        print("⚠️  WARNING: Intrinsic rewards very high - might overwhelm external rewards")
+    else:
+        print("✅ Intrinsic reward range looks reasonable")
+    
+    print("="*50)
+
+
+def debug_training_progress(agent):
+    """Debug why agent isn't learning. Uses agent's environment name."""
+    print("\n" + "="*50)
+    print("TRAINING DEBUG")
+    print("="*50)
+    print(f"Environment: {agent.env_name}")
+    
+    # Check if DQN is actually updating
+    q_net_params = list(agent.q_net.parameters())
+    if len(q_net_params) > 0:
+        total_grad_norm = 0
+        param_count = 0
+        for param in q_net_params:
+            if param.grad is not None:
+                total_grad_norm += param.grad.data.norm(2).item()
+                param_count += 1
+        
+        if param_count > 0:
+            avg_grad_norm = total_grad_norm / param_count
+            print(f"DQN Gradient Norm: {avg_grad_norm:.6f}")
+            if avg_grad_norm < 1e-6:
+                print("⚠️  WARNING: Very small gradients - learning might be stuck")
+        else:
+            print("⚠️  WARNING: No gradients found - DQN not updating")
+    
+    # Check replay buffer
+    buffer_size = len(agent.replay_buffer)
+    print(f"Replay Buffer Size: {buffer_size}")
+    if buffer_size < agent.batch_size:
+        print("⚠️  WARNING: Replay buffer too small for learning")
+    
+    # Check CFN buffer
+    cfn_buffer_size = agent.cfn_buffer.size
+    print(f"CFN Buffer Size: {cfn_buffer_size}")
+    
+    # Sample from replay buffer to check reward distribution
+    if buffer_size >= agent.batch_size:
+        import random
+        sample = random.sample(agent.replay_buffer, min(100, buffer_size))
+        rewards = [transition[2] for transition in sample]  # reward is index 2
+        print(f"Recent Rewards - Mean: {np.mean(rewards):.3f}, Std: {np.std(rewards):.3f}")
+        print(f"Reward Range: {np.min(rewards):.3f} to {np.max(rewards):.3f}")
+        
+        # Count zero rewards
+        zero_count = sum(1 for r in rewards if abs(r) < 0.01)
+        print(f"Zero/Near-zero rewards: {zero_count}/100 ({zero_count}%)")
+    
+    print("="*50)
+
+
+def quick_test(agent):
+    """Quick test to see if agent is working. Uses agent's environment name."""
     print("Running quick performance test...")
-    metrics = evaluate_agent_performance(agent, env_name, num_episodes=5)
+    metrics = evaluate_agent_performance(agent, num_episodes=5)
     
     if metrics['success_rate'] > 0:
         print("🎉 Agent is successfully solving some episodes!")
         print("Creating demonstration GIF...")
-        create_evaluation_gif(agent, env_name, gif_path="quick_demo.gif", num_episodes=2)
+        create_evaluation_gif(agent, gif_path="quick_demo.gif", num_episodes=2)
     else:
         print("❌ Agent is not yet successful. Keep training!")
     
     return metrics
 
 
-def full_evaluation(agent, env_name="MiniGrid-DoorKey-5x5-v0"):
-    """Full evaluation with GIF creation."""
+def full_evaluation(agent):
+    """Full evaluation with GIF creation. Uses agent's environment name."""
     print("Running full evaluation...")
     
     # Performance metrics
-    metrics = evaluate_agent_performance(agent, env_name, num_episodes=20)
+    metrics = evaluate_agent_performance(agent, num_episodes=20)
     
     # Create demonstration GIF
     print("Creating demonstration GIF...")
     episode_info = create_evaluation_gif(
-        agent, env_name, 
+        agent, 
         gif_path="full_evaluation.gif", 
         num_episodes=5, 
         fps=3
