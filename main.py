@@ -6,12 +6,15 @@ import hydra
 import wandb
 from omegaconf import DictConfig
 
+from agents.dqn_cfn import DQN_CFNAgent
 from agents.sac_agent import SACAgent
 from agents.sac_cfn_agent import SACCFNAgent
+from agents.sac_cfn_discrete import SACCFNAgentDiscrete
 from agents.sac_mrl_agent import SACMRLAgent
 from agents.sac_rnd_agent import SACRNDAgent
 from agents.td3 import TD3Agent
 from agents.td3_cfn import TD3CFNAgent
+# from networks.encoder import CNNEncoder, MLPEncoder
 from utils.env_wrapper import make_env
 from utils.misc import set_seed
 
@@ -25,9 +28,12 @@ def create_agent(cfg: DictConfig, env):
                         render_mode=cfg.env.render_mode,
                         max_episode_steps=cfg.env.max_episode_steps)
 
+    obs_shape = env.observation_space.shape
+
     if agent_id == "sac_agent":
         if use_cfn:
-            agent = SACCFNAgent(
+            if cfg.env.cnn:
+                agent = SACCFNAgentDiscrete(
                 env=env,
                 lr=cfg.agent.lr,
                 gamma=cfg.agent.discount_factor,
@@ -36,8 +42,20 @@ def create_agent(cfg: DictConfig, env):
                 maxlen=cfg.agent.replay_buffer_size,
                 target_entropy=cfg.agent.target_entropy,
                 cfn_cfg=cfg.cfn,
-                eval_env=eval_env
+                eval_env=eval_env,
             )
+            else:
+                agent = SACCFNAgent(
+                    env=env,
+                    lr=cfg.agent.lr,
+                    gamma=cfg.agent.discount_factor,
+                    tau=cfg.agent.tau,
+                    batch_size=cfg.agent.batch_size,
+                    maxlen=cfg.agent.replay_buffer_size,
+                    target_entropy=cfg.agent.target_entropy,
+                    cfn_cfg=cfg.cfn,
+                    eval_env=eval_env,
+                )
         elif cfg.agent.rnd:
             print("SAC RND agent")
             agent = SACRNDAgent(
@@ -48,8 +66,9 @@ def create_agent(cfg: DictConfig, env):
                 batch_size=cfg.agent.batch_size,
                 maxlen=cfg.agent.replay_buffer_size,
                 target_entropy=cfg.agent.target_entropy,
-                rnd_cfg=cfg.rnd  
-        )
+                rnd_cfg=cfg.rnd,
+                
+            )
         elif cfg.agent.mrl:
             print("SAC MRL agent")
             agent = SACMRLAgent(
@@ -63,6 +82,8 @@ def create_agent(cfg: DictConfig, env):
                 alpha=cfg.mrl.alpha,
                 tau_m=cfg.mrl.tau,
                 lo=cfg.mrl.lo,
+            
+
             )
         else:
             agent = SACAgent(
@@ -72,7 +93,8 @@ def create_agent(cfg: DictConfig, env):
                 batch_size=cfg.agent.batch_size,
                 maxlen=cfg.agent.replay_buffer_size,
                 target_entropy=cfg.agent.target_entropy,
-                eval_env=eval_env
+                eval_env=eval_env,
+            
             )
 
     elif agent_id == "td3_agent":
@@ -89,7 +111,8 @@ def create_agent(cfg: DictConfig, env):
                 learning_starts=cfg.agent.learning_starts,
                 policy_frequency=cfg.agent.policy_frequency,
                 noise_clip=cfg.agent.noise_clip,
-                eval_env=eval_env
+                eval_env=eval_env,
+            
             )
         else:
             agent = TD3Agent(
@@ -103,6 +126,16 @@ def create_agent(cfg: DictConfig, env):
                 learning_starts=cfg.agent.learning_starts,
                 policy_frequency=cfg.agent.policy_frequency,
                 noise_clip=cfg.agent.noise_clip,
+            
+            )
+
+    elif agent_id == "dqn_agent":
+        if use_cfn:
+            agent = DQN_CFNAgent(
+                env=env,
+                eval_env=eval_env,
+                dqn_cfg=cfg.agent,
+                cfn_cfg=cfg.cfn
             )
 
     else:
@@ -124,7 +157,7 @@ def main(cfg: DictConfig):
 
     wandb.init(
         project="sac-reward-aug",
-        name=f"{cfg.agent.id}_{cfg.env.id}_{rew_aug}",
+        name=f"{cfg.agent.id.lower()}_{cfg.env.id}_{rew_aug}",
         config=dict(cfg),
         reinit=True
     )

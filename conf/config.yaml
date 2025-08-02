@@ -1,6 +1,6 @@
 defaults:
-  - agent: sac_agent #sac_agent #td3_agent
-  - env: reacher #reacher #half_cheetah
+  - agent: dqn #sac_agent #td3_agent
+  - env: door_key #reacher #half_cheetah
   - cfn: cfn
   - rnd: rnd
   - mrl: mrl
@@ -9,8 +9,7 @@ seed: 42
 
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${agent.id}-${env.id}-${cfn.enabled}
-#
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${agent.id}-${env.id}-cfn${agent.cfn}-rnd${agent.rnd}-mrl${agent.mrl}
 #hydra:
 #  mode: MULTIRUN
 #  sweeper:

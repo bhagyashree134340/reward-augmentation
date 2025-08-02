@@ -1,8 +1,9 @@
-
 import logging
 import torch
 import torch.nn.functional as F
 import numpy as np
+import wandb
+
 from RND.rnd import RNDModel, RewardForwardFilter
 from gymnasium.wrappers.utils import RunningMeanStd
 import torch.nn.functional as F
@@ -11,6 +12,7 @@ from utils.evaluate import evaluate
 from utils.validate import validate
 
 log = logging.getLogger(__name__)
+
 
 class SACRNDAgent(SACAgent):
     def __init__(self, env, eval_env, rnd_cfg, **kwargs):
@@ -41,8 +43,14 @@ class SACRNDAgent(SACAgent):
                 action, _ = self.actor(obs)
                 action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
 
-            next_obs, ext_reward, terminated, truncated, _ = self.env.step(action)
+            next_obs, ext_reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
+
+            # wandb.log({"reward dist": info["reward_dist"],
+            #            "reward control": info["reward_ctrl"],
+            #            # "reward near": info["reward_near"]
+            #            },
+            #           step=current_timestep)
 
             next_obs_tensor = torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0)
             self.obs_rms.update(next_obs_tensor.numpy())
@@ -61,16 +69,16 @@ class SACRNDAgent(SACAgent):
             total_reward = self.extrinsic_coef * ext_reward + self.intrinsic_coef * norm_int_reward
 
             self.buffer.add(
-            obs=obs.cpu().numpy().astype(np.float32),
-            act=np.array(action, dtype=np.float32),
-            ext_rew=np.array(ext_reward, dtype=np.float32),
-            int_rew=np.array(norm_int_reward, dtype=np.float32),
-            next_obs=np.array(next_obs, dtype=np.float32),
-            done=np.array(done, dtype=np.float32)
-)
+                obs=obs.cpu().numpy().astype(np.float32),
+                act=np.array(action, dtype=np.float32),
+                ext_rew=np.array(ext_reward, dtype=np.float32),
+                int_rew=np.array(norm_int_reward, dtype=np.float32),
+                next_obs=np.array(next_obs, dtype=np.float32),
+                done=np.array(done, dtype=np.float32)
+            )
 
             mask_prob = self.rnd_cfg.rnd_mask_prob if hasattr(self.rnd_cfg, "rnd_mask_prob") else 0.25
-            mask = torch.rand_like(pred[:, 0]) < mask_prob 
+            mask = torch.rand_like(pred[:, 0]) < mask_prob
             if mask.sum() > 0:
                 forward_loss = F.mse_loss(pred[mask], target.detach()[mask])
                 self.rnd_optimizer.zero_grad()
@@ -89,7 +97,8 @@ class SACRNDAgent(SACAgent):
 
                 total_rew_batch = self.extrinsic_coef * ext_rew_batch + self.intrinsic_coef * int_rew_batch
 
-                self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, done_batch, current_step=current_timestep)
+                self.update(obs_batch, act_batch, total_rew_batch, next_obs_batch, done_batch,
+                            current_step=current_timestep)
 
             obs = next_obs
             current_timestep += 1
@@ -101,7 +110,7 @@ class SACRNDAgent(SACAgent):
                     f"Episode done | Steps: {episode_step} | "
                     f"Return: {episode_return:.2f} | Total Timesteps: {current_timestep}"
                 )
-                
+
                 obs, _ = self.env.reset()
                 obs = torch.tensor(obs, dtype=torch.float32, device=self.device)
                 episode_return = 0
@@ -110,7 +119,8 @@ class SACRNDAgent(SACAgent):
             if current_timestep % 1000 == 0:
                 validate(self.actor, current_timestep)
 
-                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep, max_episode_steps)
+                eval_envstep, eval_mean, eval_std = evaluate(self.actor, self.eval_env, current_timestep,
+                                                             max_episode_steps)
                 self.eval_envsteps.append(eval_envstep)
                 self.eval_means.append(eval_mean)
                 self.eval_stds.append(eval_std)

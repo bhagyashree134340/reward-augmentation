@@ -40,3 +40,6 @@ sentry-sdk==2.27.0
 stable_baselines3==2.6.0
 sympy==1.13.3
 wandb==0.19.10
+torch~=2.7.0
+cpprb~=11.0.0
+mujoco~=2.2.2

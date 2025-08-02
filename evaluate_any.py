@@ -1,29 +1,20 @@
 import os
-os.environ["MUJOCO_GL"] = "egl" 
+# os.environ["MUJOCO_GL"] = "egl"
 import logging
 
-import hydra
 import torch
-import numpy as np
-import os
-from pathlib import Path
-import re
 import wandb
 import gymnasium as gym
 import gymnasium_robotics
-from gymnasium.wrappers import TimeLimit
-
-from utils.env_wrapper import make_env
-
-gym.register_envs(gymnasium_robotics)
-from hydra.core.hydra_config import HydraConfig
-
 from networks.network import Actor
 from utils.evaluate import evaluate
 from utils.gif import save_rollout_gif
+from utils.env_wrapper import make_env
+
+gym.register_envs(gymnasium_robotics)
+
 
 log = logging.getLogger(__name__)
-
 
 
 def load_actor(actor_path, actor_class, obs_dim, act_dim, act_low, act_high):
@@ -40,18 +31,19 @@ def main():
 
     wandb.init(
         project="sac-reward-aug-evaluate",
-        reinit=True
+        reinit=True,
+        mode="disabled"
     )
 
     # TODO: will go in a config
-    actor_path = "/home/raneb/project/reward-augmentation/outputs/2025-06-14/08-47-26-sac_agent-FetchPushDense-v4-True/checkpoints/sac_actor_step1000000.pt"
+    actor_path = "outputs/2025-07-28/07-16-00-sac_agent-HalfCheetah-v5-cfnFalse-rndFalse-mrlTrue/checkpoints/sac_actor_step100000.pt"
     max_steps = 1000
 
     # TODO: put it in a make_env()
     env = make_env(
-        env_name="FetchPushDense-v4",
+        env_name='HalfCheetah-v5',
         render_mode="rgb_array",
-        max_episode_steps=100,
+        max_episode_steps=1000,
     )
 
     actor = load_actor(actor_path, Actor,
@@ -59,7 +51,7 @@ def main():
                        env.action_space.shape[0],
                        env.action_space.low,
                        env.action_space.high)
-    
+
     actor = actor.to(device)
 
     # TODO: add an output dir param
@@ -68,7 +60,7 @@ def main():
     log.info(f"mean return: {mean_r} ± {std_r}")
 
     #     TODO: add plots and gifs
-    for i in range(5):
+    for i in range(1):
         save_rollout_gif(actor, env, f"evaluate_any_outputs/eval_gif_{i}.gif")
 
 

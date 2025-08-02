@@ -3,8 +3,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.optim as optim
+import mujoco
 import wandb
-from cpprb import HindsightReplayBuffer
+import gymnasium as gym
 from hydra.core.hydra_config import HydraConfig
 import torch.nn.functional as F
 from CFN.CFN import CoinFlipNetwork
@@ -61,15 +62,21 @@ class SACCFNAgent(SACAgent):
         obs = torch.tensor(obs_np, dtype=torch.float32, device=self.device)
 
         while current_timestep < total_timesteps:
-
             with torch.no_grad():
                 action, _ = self.actor(obs)
                 action = action.cpu().numpy().clip(self.env.action_space.low, self.env.action_space.high)
 
             next_obs_np, reward, terminated, truncated, info = self.env.step(action)
 
-            # wandb.log({"reward dist": info["reward_dist"], "reward control": info["reward_ctrl"]},
+            # if current_timestep < 25_000:
+            #     reward -= info["reward_ctrl"]
+            #
+            # wandb.log({"reward dist": info["reward_dist"],
+            #            "reward control": info["reward_ctrl"],
+            #            # "reward near": info["reward_near"]
+            #            },
             #           step=current_timestep)
+
             next_obs = torch.tensor(next_obs_np, dtype=torch.float32, device=self.device)
             done = terminated or truncated
 
@@ -180,6 +187,7 @@ class SACCFNAgent(SACAgent):
 
                 obs_np, _ = self.env.reset()
                 obs = torch.tensor(obs_np, dtype=torch.float32, device=self.device)
+
                 episode_return = 0
                 episode_step = 0
                 episode_num += 1

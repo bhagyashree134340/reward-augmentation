@@ -1,7 +1,7 @@
 enabled: True
 cfn_lr: 1e-4 #0.001
-cfn_replay_buffer_size: 1_000_000
-cfn_batch_size: 1024 
+cfn_replay_buffer_size: 2_000_000
+cfn_batch_size: 2048
 cfn_coin_flip_dim: 20
 use_cfn_priority: True
 use_cfn_prior: True

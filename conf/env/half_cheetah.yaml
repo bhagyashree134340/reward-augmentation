@@ -1,3 +1,4 @@
 id: 'HalfCheetah-v5'
 render_mode: rgb_array
 max_episode_steps: 1000
+cnn: False

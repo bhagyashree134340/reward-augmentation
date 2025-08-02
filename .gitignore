@@ -17,13 +17,15 @@ Thumbs.db
 # Logs
 *.log
 
+*.pth
+
 
 # Actor checkpoints
 *.pt
 *.npz
 *.gif
-*.png
 *.yaml
+*.png
 *.json
 *.wandb
 wandb

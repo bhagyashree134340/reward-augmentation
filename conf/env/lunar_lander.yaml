@@ -3,3 +3,4 @@ gravity: -10.0
 render_mode: rgb_array
 continuous: True
 use_goal: False
+cnn: False
