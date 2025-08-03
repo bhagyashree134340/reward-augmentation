@@ -1,8 +1,7 @@
 import sys
 import os
 
-from utils.evaluation_utils import create_evaluation_gif, debug_training_progress, diagnose_cfn_issues, evaluate_agent_performance, full_evaluation, quick_test
-from validate import validate_dqn
+from utils.validate import validate_dqn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import time
 import torch
@@ -125,11 +124,9 @@ class DQN_CFNAgent:
 
         learning_starts = max(10000, self.batch_size * 4)
 
-
         while current_timestep < total_timesteps:
            
-            # epsilon = max(self.cfn_cfg.epsilon_end, 
-            #              self.cfn_cfg.epsilon_start * (self.cfn_cfg.epsilon_decay ** current_timestep))
+            epsilon = max(self.cfn_cfg.epsilon_end, epsilon * self.cfn_cfg.epsilon_decay)
             
             action = self.act(obs, epsilon)
 
@@ -152,7 +149,7 @@ class DQN_CFNAgent:
                 )
                 
             intrinsic_reward_scaled = intrinsic_reward.item()
-            total_reward = (2.0 * reward) + intrinsic_reward_scaled
+            total_reward = reward + intrinsic_reward_scaled
             # avg_rewards.append(total_reward)
 
             if current_timestep % 1000 == 0:
@@ -219,8 +216,8 @@ class DQN_CFNAgent:
                     f"Total Timesteps: {current_timestep}"
                 )
 
-                if epsilon > self.cfn_cfg.epsilon_end:
-                    epsilon *= self.cfn_cfg.epsilon_decay
+                # if epsilon > self.cfn_cfg.epsilon_end:
+                #     epsilon *= self.cfn_cfg.epsilon_decay
 
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
@@ -242,34 +239,25 @@ class DQN_CFNAgent:
         rew = torch.tensor(rew, dtype=torch.float32, device=self.device)
         done = torch.tensor(done, dtype=torch.float32, device=self.device)
 
-        # Current Q-values
         q_vals = self.q_net(obs)
         q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)
 
-        # Target Q-values using Double DQN
         with torch.no_grad():
-            # Use main network to select action
             next_q_vals_main = self.q_net(next_obs)
             next_actions = next_q_vals_main.argmax(1)
             
-            # Use target network to evaluate the selected action
             next_q_vals_target = self.target_q_net(next_obs)
             max_next_q_vals = next_q_vals_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
             
             target = rew + (1 - done) * self.gamma * max_next_q_vals
 
-        # Compute loss with gradient clipping
         loss = F.mse_loss(q_val, target)
         
         self.optimizer.zero_grad()
         loss.backward()
         
-        # Gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
-        
         self.optimizer.step()
         
-        # Log loss occasionally
         if self.update_count % 1000 == 0:
             wandb.log({
                 "training/dqn_loss": loss.item(),
@@ -278,7 +266,6 @@ class DQN_CFNAgent:
             }, step=current_timestep)
 
     def update_cfn(self, obs_batch, coin_flip_batch, current_timestep):
-        # Fix tensor conversion warnings
         if isinstance(obs_batch, torch.Tensor):
             obs_tensor = obs_batch.to(self.device)
         else:
@@ -295,12 +282,8 @@ class DQN_CFNAgent:
         self.cfn_optimizer.zero_grad()
         cfn_loss.backward()
         
-        # Gradient clipping for CFN as well
-        torch.nn.utils.clip_grad_norm_(self.cfn.parameters(), max_norm=1.0)
-        
         self.cfn_optimizer.step()
         
-        # Log CFN loss occasionally
         if self.update_count % 1000 == 0:
             wandb.log({
                 "training/cfn_loss": cfn_loss.item(),

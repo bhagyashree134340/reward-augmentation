@@ -1,5 +1,8 @@
 import sys
 import os
+
+from utils.evaluate import evaluate_dqn
+from utils.validate import validate_dqn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import time
 import torch
@@ -351,27 +354,9 @@ class DQN_RNDAgent:
                 episode_step = 0
                 episode_num += 1
 
-        # Final evaluation
-        print("\n" + "="*50)
-        print("TRAINING COMPLETED - FINAL EVALUATION")
-        print("="*50)
-        
-        try:
-            from evaluation_utils import full_evaluation, quick_test
-            
-            # Quick test first
-            quick_metrics = quick_test(agent=self)
-            
-            # Full evaluation if agent shows promise
-            if quick_metrics['success_rate'] > 0.2:  # If >20% success rate
-                print("Agent shows promise! Running full evaluation...")
-                full_metrics, episode_info = full_evaluation(agent=self)
-            else:
-                print("Agent needs more training, but creating a demo GIF anyway...")
-                from evaluation_utils import create_evaluation_gif
-                create_evaluation_gif(self, gif_path="training_demo.gif", num_episodes=3)
-        except ImportError:
-            print("evaluation_utils not available, skipping final evaluation")
+            if current_timestep % 10000 == 0 and current_timestep > 0:
+                    validate_dqn(self, current_timestep)
+                    evaluate_dqn(self, self.env, current_timestep)
 
     def update_dqn(self, batch):
         """Update DQN networks"""

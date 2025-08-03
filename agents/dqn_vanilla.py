@@ -126,7 +126,7 @@ class DQNAgent:
             episode_step += 1
             current_timestep += 1
 
-            if done or episode_step >= max_episode_steps:
+            if done:
                 stats.episode_rewards.append(episode_return)
                 stats.episode_lengths.append(episode_step)
                 stats.timesteps_on_ep_end.append(current_timestep)
@@ -137,7 +137,7 @@ class DQNAgent:
                     "charts/episode_num": episode_num
                 }, step=current_timestep)
 
-                log.info(
+                print(
                     f"Episode {episode_num} | Steps: {episode_step} | "
                     f"Return: {reward:.2f} | Epsilon: {epsilon:.3f} | "
                     f"Total Timesteps: {current_timestep}"
