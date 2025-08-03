@@ -72,8 +72,7 @@ class SACAgent:
         # Initialize two critic and one actor network
         self.q1 = Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(self.device)
         self.q2 = Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(self.device)
-        self.actor = Actor(env.observation_space.shape[0], env.action_space.shape[0], env.action_space.low,
-                           env.action_space.high).to(self.device)
+        self.actor = Actor(env.observation_space.shape[0], env.action_space.shape[0], action_low=env.action_space.low, action_high=env.action_space.high).to(self.device)
         self.log_ent_coef = torch.zeros(1, requires_grad=True, device=self.device)
 
         # Initialze two target critic and one target actor networks and load the corresponding state_dicts

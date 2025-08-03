@@ -68,6 +68,8 @@ class SACCFNAgent(SACAgent):
 
             next_obs_np, reward, terminated, truncated, info = self.env.step(action)
 
+            reward -= (info["reward_ctrl"] + info["reward_near"])
+
             # if current_timestep < 25_000:
             #     reward -= info["reward_ctrl"]
             #

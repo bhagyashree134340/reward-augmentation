@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -p aisdlc_gpu-rtx2080     
 #SBATCH --gres=gpu:1                
-#SBATCH --mem=2000              
-#SBATCH -t 0-06:00                  
+#SBATCH --mem=8000              
+#SBATCH -t 0-20:00                  
 #SBATCH -c 1                        
 #SBATCH -o log/evaluate.%j.out         # STDOUT log (job ID in filename)
 #SBATCH -e log/evaluate.%j.err         # STDERR log (job ID in filename)
@@ -25,7 +25,8 @@ start=`date +%s`
 # Run your Python script
 echo "Running training script..."
 cd /work/dlclarge2/raneb-project/reward-augmentation
-python agents/qlearning-rnd-basic.py
+export PYTHONPATH=$PWD
+python agents/dqn_cfn.py
 
 end=`date +%s`
 runtime=$((end-start))

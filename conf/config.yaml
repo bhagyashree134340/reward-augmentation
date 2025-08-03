@@ -1,6 +1,6 @@
 defaults:
-  - agent: dqn #sac_agent #td3_agent
-  - env: door_key #reacher #half_cheetah
+  - agent: sac_agent #sac_agent #td3_agent
+  - env: pusher #reacher #half_cheetah
   - cfn: cfn
   - rnd: rnd
   - mrl: mrl

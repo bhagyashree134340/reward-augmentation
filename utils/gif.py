@@ -48,8 +48,10 @@ def evaluate_policy(actor, env, num_episodes: int = 10, max_steps: int = 1000, d
 
             all_actions.append(action)
 
-            obs, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             all_rewards.append(reward)
+
+            reward -= (info["reward_ctrl"] + info["reward_near"])
 
             total_reward += reward
             done = terminated or truncated

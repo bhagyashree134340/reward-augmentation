@@ -34,6 +34,9 @@ def create_evaluation_gif(agent, max_steps=300, gif_path="agent_performance.gif"
     all_frames = []
     episode_info = []
     
+    # Standard frame size for consistency
+    FRAME_SIZE = (400, 400)
+    
     for episode in range(num_episodes):
         obs_raw, _ = eval_env.reset()
         obs = agent.process_obs(obs_raw)
@@ -43,16 +46,16 @@ def create_evaluation_gif(agent, max_steps=300, gif_path="agent_performance.gif"
         episode_steps = 0
         done = False
         
-        # Add episode header frame
-        header_frame = create_text_frame(f"Episode {episode + 1}", size=(400, 50))
+        # Add episode header frame with consistent size
+        header_frame = create_text_frame(f"Episode {episode + 1}", size=FRAME_SIZE)
         episode_frames.append(header_frame)
         
         while not done and episode_steps < max_steps:
             # Render the environment
             frame = eval_env.render()
             if frame is not None:
-                # Resize frame for better visibility
-                frame = resize_frame(frame, target_size=(400, 400))
+                # Resize frame to consistent size
+                frame = resize_frame(frame, target_size=FRAME_SIZE)
                 episode_frames.append(frame)
             
             # Agent takes action (no exploration during evaluation)
@@ -67,14 +70,14 @@ def create_evaluation_gif(agent, max_steps=300, gif_path="agent_performance.gif"
             episode_reward += reward
             episode_steps += 1
         
-        # Add episode summary frame
+        # Add episode summary frame with consistent size
         status = "SUCCESS!" if terminated else "TIMEOUT" if episode_steps >= max_steps else "FAILED"
         summary_frame = create_text_frame(
             f"Episode {episode + 1} Complete\n"
             f"Status: {status}\n"
             f"Steps: {episode_steps}\n"
             f"Reward: {episode_reward:.2f}",
-            size=(400, 200)
+            size=FRAME_SIZE  # Use same size as other frames
         )
         episode_frames.append(summary_frame)
         
@@ -92,10 +95,29 @@ def create_evaluation_gif(agent, max_steps=300, gif_path="agent_performance.gif"
         
         print(f"Episode {episode + 1}: {status}, Steps: {episode_steps}, Reward: {episode_reward:.2f}")
     
-    # Save GIF
+    # Ensure all frames have the same shape before saving
     if all_frames:
-        imageio.mimsave(gif_path, all_frames, fps=fps)
-        print(f"GIF saved to: {gif_path}")
+        # Convert all frames to numpy arrays with consistent shape
+        consistent_frames = []
+        for frame in all_frames:
+            if isinstance(frame, np.ndarray):
+                # Ensure frame has correct shape (H, W, 3)
+                if len(frame.shape) == 2:  # Grayscale
+                    frame = np.stack([frame] * 3, axis=-1)
+                elif frame.shape[-1] == 4:  # RGBA
+                    frame = frame[:, :, :3]  # Remove alpha channel
+                
+                # Ensure frame is the right size
+                if frame.shape[:2] != FRAME_SIZE:
+                    frame = resize_frame(frame, target_size=FRAME_SIZE)
+                
+                consistent_frames.append(frame.astype(np.uint8))
+        
+        if consistent_frames:
+            imageio.mimsave(gif_path, consistent_frames, fps=fps)
+            print(f"GIF saved to: {gif_path}")
+        else:
+            print("No valid frames to save")
     
     eval_env.close()
     return episode_info
@@ -177,11 +199,11 @@ def evaluate_agent_performance(agent, num_episodes=10, max_steps=300):
     return metrics
 
 
-def create_text_frame(text, size=(400, 100), bg_color=(255, 255, 255), text_color=(0, 0, 0)):
-    """Create a frame with text for the GIF."""
+def create_text_frame(text, size=(400, 400), bg_color=(255, 255, 255), text_color=(0, 0, 0)):
+    """Create a frame with text for the GIF with consistent size."""
     from PIL import Image, ImageDraw, ImageFont
     
-    # Create image
+    # Create image with exact size
     img = Image.new('RGB', size, bg_color)
     draw = ImageDraw.Draw(img)
     
@@ -207,13 +229,45 @@ def create_text_frame(text, size=(400, 100), bg_color=(255, 255, 255), text_colo
 
 
 def resize_frame(frame, target_size=(400, 400)):
-    """Resize frame to target size."""
+    """Resize frame to target size maintaining aspect ratio and ensuring correct format."""
     if frame is None:
         return None
     
-    img = Image.fromarray(frame)
-    img = img.resize(target_size, Image.Resampling.NEAREST)  # Use nearest neighbor for pixel art
-    return np.array(img)
+    # Convert to PIL Image
+    if isinstance(frame, np.ndarray):
+        # Ensure frame is uint8
+        if frame.dtype != np.uint8:
+            frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
+        
+        # Handle different channel configurations
+        if len(frame.shape) == 2:  # Grayscale
+            img = Image.fromarray(frame, mode='L').convert('RGB')
+        elif len(frame.shape) == 3:
+            if frame.shape[2] == 3:  # RGB
+                img = Image.fromarray(frame, mode='RGB')
+            elif frame.shape[2] == 4:  # RGBA
+                img = Image.fromarray(frame, mode='RGBA').convert('RGB')
+            else:
+                # Handle unexpected channel count
+                img = Image.fromarray(frame[:, :, 0], mode='L').convert('RGB')
+        else:
+            raise ValueError(f"Unexpected frame shape: {frame.shape}")
+    else:
+        img = frame
+    
+    # Resize with nearest neighbor for pixel art (better for MiniGrid)
+    img = img.resize(target_size, Image.Resampling.NEAREST)
+    
+    # Convert back to numpy array
+    result = np.array(img)
+    
+    # Ensure result has shape (H, W, 3)
+    if len(result.shape) == 2:
+        result = np.stack([result] * 3, axis=-1)
+    elif result.shape[2] != 3:
+        result = result[:, :, :3]
+    
+    return result.astype(np.uint8)
 
 
 def save_training_progress_gif(agent, save_dir="./gifs", 
