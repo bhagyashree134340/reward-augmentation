@@ -20,6 +20,67 @@ import wandb
 from hydra.core.hydra_config import HydraConfig
 
 
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import os
+
+def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to_wandb=True):
+    """
+    Evaluate DQN agent and log results.
+
+    Args:
+        agent: DQN agent (must have q_net and process_obs)
+        eval_env: Evaluation environment
+        step: Current training step
+        save_dir: Directory to save plots and data
+        num_episodes: Number of episodes to evaluate
+        log_to_wandb: If True, log returns to wandb per episode
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    returns = []
+
+    for ep in range(num_episodes):
+        obs_raw, _ = eval_env.reset()
+        obs = agent.process_obs(obs_raw)
+        done = False
+        total_return = 0
+        ep_len = 0
+
+        while not done:
+            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(agent.device)
+            with torch.no_grad():
+                q_values = agent.q_net(obs_tensor)
+                action = torch.argmax(q_values, dim=1).item()
+
+            next_obs_raw, reward, terminated, truncated, _ = eval_env.step(action)
+            done = terminated or truncated
+            obs = agent.process_obs(next_obs_raw)
+            total_return += reward
+            ep_len += 1
+
+        returns.append(total_return)
+
+        if log_to_wandb:
+            import wandb
+            wandb.log({
+                "eval/episode_return": total_return,
+                "eval/episode_length": ep_len,
+                "eval/episode_idx": ep,
+            }, step=step)
+
+    returns = np.array(returns)
+    np.savez(os.path.join(save_dir, f"eval_step_{step}.npz"), returns=returns)
+
+    if log_to_wandb:
+        wandb.log({
+            "eval/mean_return": returns.mean(),
+            "eval/std_return": returns.std()
+        }, step=step)
+
+    print(f"[EVAL] Step {step} | Avg return: {returns.mean():.2f}")
+
+
 def evaluate(actor, env, current_timestep, max_steps, path=None, device=None):
     env.training = False
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
