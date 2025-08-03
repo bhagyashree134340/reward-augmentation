@@ -150,14 +150,8 @@ class DQN_CFNAgent:
                     self.cfn.compute_squared_output_norm(obs_tensor)
                 )
                 
-            if current_timestep < 50_000:
-                scale = 10.0
-            elif current_timestep < 100_000:
-                scale = 5.0
-            elif current_timestep < 200_000:
-                scale = 2.0
-            intrinsic_reward_scaled = intrinsic_reward.item() * scale
-            total_reward = (3.0 * reward) + intrinsic_reward_scaled
+            intrinsic_reward_scaled = intrinsic_reward.item()
+            total_reward = (2.0 * reward) + intrinsic_reward_scaled
             # avg_rewards.append(total_reward)
 
             if current_timestep % 1000 == 0:
@@ -369,16 +363,18 @@ from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
 def main():
     ENV_NAME = "MiniGrid-DoorKey-6x6-v0"  
     
-    wandb.init(project="dqn", name="cfn-improved")  
+    wandb.init(project="dqn", name="cfn-improved-cpu")  
 
-    env = gym.make(ENV_NAME, render_mode="rgb_array")
+    max_episode_steps = 250
+
+    env = gym.make(ENV_NAME, render_mode="human", max_episode_steps=max_episode_steps)
     env = FullyObsWrapper(env)
     env = ImgObsWrapper(env)
 
-    eval_env = gym.make(ENV_NAME, render_mode="rgb_array")
+    eval_env = gym.make(ENV_NAME, render_mode="rgb_array", max_episode_steps=max_episode_steps)
     eval_env = FullyObsWrapper(eval_env)
     eval_env = ImgObsWrapper(eval_env)
-    max_episode_steps = 300
+    
 
     total_timesteps = 1000_000
 
@@ -392,7 +388,7 @@ def main():
 
    
     cfn_coin_flip_dim = 20  
-    cfn_lr = 1e-4  
+    cfn_lr = 1e-5  
     cfn_replay_buffer_size = 1000_000
     cfn_batch_size = 1024  
     learning_starts = 2000  

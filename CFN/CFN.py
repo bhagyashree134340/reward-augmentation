@@ -152,7 +152,7 @@ class CoinFlipNetworkCNN(nn.Module):
 
         with torch.no_grad():
             prior_out = self.prior(obs)
-            if update_prior_stats and self.training and self.prior_count.item() > 100:
+            if update_prior_stats:
                 self.update_prior_stats(prior_out)
 
             std = torch.sqrt(self.prior_var + 1e-4)
