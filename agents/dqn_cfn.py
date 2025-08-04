@@ -82,6 +82,7 @@ class DQN_CFNAgent:
         self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
         self.use_cfn_prior = cfn_cfg.use_cfn_prior
         self.use_cfn_priority = cfn_cfg.use_cfn_priority
+
         
         # tracking for debugging
         self.step_count = 0
@@ -126,7 +127,7 @@ class DQN_CFNAgent:
 
         while current_timestep < total_timesteps:
            
-            epsilon = max(self.cfn_cfg.epsilon_end, epsilon * self.cfn_cfg.epsilon_decay)
+            # epsilon = max(self.cfn_cfg.epsilon_end, epsilon * self.cfn_cfg.epsilon_decay)
             
             action = self.act(obs, epsilon)
 
@@ -148,7 +149,7 @@ class DQN_CFNAgent:
                     self.cfn.compute_squared_output_norm(obs_tensor)
                 )
                 
-            intrinsic_reward_scaled = intrinsic_reward.item()
+            intrinsic_reward_scaled = intrinsic_reward.item() * 10.0
             total_reward = reward + intrinsic_reward_scaled
             # avg_rewards.append(total_reward)
 
@@ -216,8 +217,8 @@ class DQN_CFNAgent:
                     f"Total Timesteps: {current_timestep}"
                 )
 
-                # if epsilon > self.cfn_cfg.epsilon_end:
-                #     epsilon *= self.cfn_cfg.epsilon_decay
+                if epsilon > self.cfn_cfg.epsilon_end:
+                    epsilon *= self.cfn_cfg.epsilon_decay
 
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
@@ -226,8 +227,8 @@ class DQN_CFNAgent:
                 episode_num += 1
             
             if current_timestep % 10000 == 0 and current_timestep > 0:
-                validate_dqn(self, current_timestep)
-                evaluate_dqn(self, self.env, current_timestep)
+                validate_dqn(self, current_timestep, save_dir="checkpoints_cfn")
+                evaluate_dqn(self, self.env, current_timestep, save_dir="checkpoints_cfn")
         
 
     def update(self, batch, current_timestep):
@@ -392,7 +393,7 @@ def log_intrinsic_reward_per_feature_from_obs(agent, obs_tensor, step=None):
 def main():
     ENV_NAME = "MiniGrid-DoorKey-6x6-v0"  
     
-    wandb.init(project="dqn", name="cfn-improved-cpu")  
+    wandb.init(project="dqn", name="cfn-improved")  
 
     max_episode_steps = 250
 
@@ -405,7 +406,7 @@ def main():
     eval_env = ImgObsWrapper(eval_env)
     
 
-    total_timesteps = 1000_000
+    total_timesteps = 1300_000
 
     
     hidden_size = 256  
@@ -417,13 +418,13 @@ def main():
 
    
     cfn_coin_flip_dim = 20  
-    cfn_lr = 1e-5  
+    cfn_lr = 0.0001  
     cfn_replay_buffer_size = 1000_000
     cfn_batch_size = 1024  
-    learning_starts = 2000  
+    learning_starts = 5000  
     epsilon_start = 1.0
     epsilon_end = 0.01  
-    epsilon_decay = 0.9998  
+    epsilon_decay = 0.999995  
     use_cfn_prior = True
     use_cfn_priority = True
 

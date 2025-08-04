@@ -242,7 +242,7 @@ class DQN_RNDAgent:
         epsilon = self.rnd_cfg.epsilon_start
 
         while current_timestep < total_timesteps:
-            epsilon = max(self.rnd_cfg.epsilon_end, epsilon * self.rnd_cfg.epsilon_decay)
+            # epsilon = max(self.rnd_cfg.epsilon_end, epsilon * self.rnd_cfg.epsilon_decay)
             action = self.act(obs, epsilon)
 
             next_obs_raw, ext_reward, terminated, truncated, _ = self.env.step(action)
@@ -319,18 +319,6 @@ class DQN_RNDAgent:
             # Evaluation during training
             if current_timestep % 50000 == 0 and current_timestep > 0:
                 print(f"\n--- Evaluation at step {current_timestep} ---")
-                try:
-                    from evaluation_utils import evaluate_agent_performance
-                    eval_metrics = evaluate_agent_performance(
-                        self, num_episodes=5, max_steps=max_episode_steps
-                    )
-                    wandb.log({
-                        "eval/mean_reward": eval_metrics['mean_reward'],
-                        "eval/success_rate": eval_metrics['success_rate'],
-                        "eval/mean_length": eval_metrics['mean_length']
-                    }, step=current_timestep)
-                except:
-                    pass  # evaluation_utils might not be available
 
             if done or episode_step >= max_episode_steps:
                 stats.episode_rewards.append(episode_return)
@@ -348,6 +336,9 @@ class DQN_RNDAgent:
                     f"Return: {episode_return:.2f} | Ext Reward: {ext_reward} | Total Timesteps: {current_timestep}"
                 )
 
+                if epsilon > self.cfn_cfg.epsilon_end:
+                    epsilon *= self.cfn_cfg.epsilon_decay
+
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
                 episode_return = 0
@@ -355,8 +346,8 @@ class DQN_RNDAgent:
                 episode_num += 1
 
             if current_timestep % 10000 == 0 and current_timestep > 0:
-                    validate_dqn(self, current_timestep)
-                    evaluate_dqn(self, self.env, current_timestep)
+                    validate_dqn(self, current_timestep, save_dir="checkpoints_rnd")
+                    evaluate_dqn(self, self.env, current_timestep, save_dir="eval_rnd")
 
     def update_dqn(self, batch):
         """Update DQN networks"""
@@ -378,8 +369,12 @@ class DQN_RNDAgent:
 
         # Target Q values
         with torch.no_grad():
-            next_q_vals = self.target_q_net(next_obs)
-            max_next_q_vals = next_q_vals.max(1)[0]
+            next_q_vals = self.q_net(next_obs)
+            next_actions = next_q_vals.argmax(1)
+
+            target_q_vals = self.target_q_net(next_obs)
+            max_next_q_vals = target_q_vals.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+
             target = total_rew + (1 - done) * self.gamma * max_next_q_vals
 
         # Compute loss and update
@@ -393,8 +388,8 @@ from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
 
 def main():
     # Initialize wandb
-    wandb.init(project="dqn-rnd", name="rnd_experiment")
-    ENV_NAME = "MiniGrid-DoorKey-5x5-v0"
+    wandb.init(project="dqn", name="rnd")
+    ENV_NAME = "MiniGrid-DoorKey-6x6-v0"  
 
     # Create environment
     env = gym.make(ENV_NAME, render_mode="rgb_array")
@@ -405,17 +400,17 @@ def main():
     eval_env = FullyObsWrapper(eval_env)
     eval_env = ImgObsWrapper(eval_env)
     
-    max_episode_steps = 300
-    total_timesteps = 500_000
+    max_episode_steps = 250
+    total_timesteps = 1300_000
 
     # DQN hyperparameters
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 128,
-        "lr": 1e-3,
+        "lr": 5e-4,
         "gamma": 0.99,
         "batch_size": 64,
         "replay_buffer_size": 50_000,
-        "target_update_freq": 500
+        "target_update_freq": 1000
     })
 
     # RND hyperparameters
@@ -423,10 +418,10 @@ def main():
         "intrinsic_coef": 1.0,
         "extrinsic_coef": 2.0,
         "lr": 1e-4,
-        "learning_starts": 5000,
+        "learning_starts": 10000,
         "epsilon_start": 1.0,
         "epsilon_end": 0.1,
-        "epsilon_decay": 0.995,
+        "epsilon_decay": 0.9998,
         "rnd_mask_prob": 0.25
     })
 
