@@ -4,9 +4,9 @@
 #SBATCH --mem=8000              
 #SBATCH -t 0-20:00                  
 #SBATCH -c 1                        
-#SBATCH -o log/evaluate.%j.out         # STDOUT log (job ID in filename)
-#SBATCH -e log/evaluate.%j.err         # STDERR log (job ID in filename)
-#SBATCH -J reward-evaluate           # Job name
+#SBATCH -o log/rnd.%j.out         # STDOUT log (job ID in filename)
+#SBATCH -e log/rnd.%j.err         # STDERR log (job ID in filename)
+#SBATCH -J rnd-dqn           # Job name
 
 echo "Working dir: $PWD"
 echo "Started at $(date)"
@@ -26,7 +26,7 @@ start=`date +%s`
 echo "Running training script..."
 cd /work/dlclarge2/raneb-project/reward-augmentation
 export PYTHONPATH=$PWD
-python agents/dqn_cfn.py
+python agents/dqn_rnd.py
 
 end=`date +%s`
 runtime=$((end-start))
