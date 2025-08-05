@@ -424,7 +424,7 @@ def main():
     learning_starts = 5000  
     epsilon_start = 1.0
     epsilon_end = 0.01  
-    epsilon_decay = 0.999995  
+    epsilon_decay = 0.9998
     use_cfn_prior = True
     use_cfn_priority = True
 

@@ -266,10 +266,9 @@ class DQN_RNDAgent:
 
             if current_timestep % 1000 == 0 and current_timestep > 0:
                 wandb.log({
-                    "ext_reward": np.mean(avg_ext_rewards) if avg_ext_rewards else 0,
-                    "int_reward": np.mean(avg_int_rewards) if avg_int_rewards else 0,
-                    "total_reward": np.mean(avg_rewards) if avg_rewards else 0,
-                    "epsilon": epsilon,
+                    "a/ext_reward": ext_reward,
+                    "a/int_reward": int_reward,
+                    "a/epsilon": epsilon,
                 }, step=current_timestep)
                 avg_rewards.clear()
                 avg_int_rewards.clear()
@@ -364,11 +363,11 @@ def main():
 
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 128,
-        "lr": 5e-4,
+        "lr": 1e-5,
         "gamma": 0.99,
-        "batch_size": 64,
-        "replay_buffer_size": 50_000,
-        "target_update_freq": 1000
+        "batch_size": 128,
+        "replay_buffer_size": 1_000_000,
+        "target_update_freq": 2000
     })
 
     rnd_cfg = type("RNDConfig", (), {
@@ -377,7 +376,7 @@ def main():
         "lr": 1e-4,
         "learning_starts": 10000,
         "epsilon_start": 1.0,
-        "epsilon_end": 0.1,
+        "epsilon_end": 0.01,
         "epsilon_decay": 0.9998,
         "rnd_mask_prob": 0.25
     })
