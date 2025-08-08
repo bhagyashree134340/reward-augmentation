@@ -26,6 +26,7 @@ from utils.plots import plot_and_save_training_metrics, plot_eval_curve, cfn_ear
 from utils.stats import EpisodeStats
 from networks.ddqn import DDQN 
 import logging
+from cpprb import ReplayBuffer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +64,17 @@ class DQN_CFNAgent:
         self.batch_size = dqn_cfg.batch_size
         self.target_update_freq = dqn_cfg.target_update_freq
 
-        self.replay_buffer = deque(maxlen=dqn_cfg.replay_buffer_size)
+        # self.replay_buffer = deque(maxlen=dqn_cfg.replay_buffer_size)
+        self.replay_buffer = ReplayBuffer(
+            dqn_cfg.replay_buffer_size,
+            env_dict={
+                "obs":      {"shape": self.obs_shape_torch, "dtype": np.uint8},
+                "act":      {"shape": 1, "dtype": np.int16},
+                "rew":      {"shape": 1, "dtype": np.float32},
+                "done":     {"shape": 1, "dtype": np.bool_},
+                "next_obs": {"shape": self.obs_shape_torch, "dtype": np.uint8},
+            },
+        )
 
         self.cfn = CoinFlipNetworkCNN(
             obs_shape=self.obs_shape_torch,
@@ -173,13 +184,21 @@ class DQN_CFNAgent:
 
             self.cfn(obs_tensor, update_prior_stats=True)
 
-            self.replay_buffer.append((obs, action, total_reward, next_obs, done))
+            # self.replay_buffer.append((obs, action, total_reward, next_obs, done))
+            self.replay_buffer.add(
+                obs=obs,
+                act=action,
+                rew=total_reward,
+                done=done,
+                next_obs=next_obs,
+            )
 
             coin_flip = get_coin_flips(self.coin_flip_dim)
-            self.cfn_buffer.add(obs=obs_tensor.detach().cpu().numpy(), coin_flip=coin_flip.detach().cpu().numpy(), priority=1.0)
+            coin_flip_np = coin_flip.detach().cpu().numpy().astype(np.float32, copy=False)
+            self.cfn_buffer.add(obs=obs, coin_flip=coin_flip_np, priority=1.0)
 
-            if current_timestep >= learning_starts and len(self.replay_buffer) >= self.batch_size:
-                batch = random.sample(self.replay_buffer, self.batch_size)
+            if current_timestep >= learning_starts and self.replay_buffer.get_stored_size() >= self.batch_size:
+                batch = self.replay_buffer.sample(self.batch_size)
                 self.update(batch, current_timestep)
                 self.update_count += 1
 
@@ -233,13 +252,11 @@ class DQN_CFNAgent:
         
 
     def update(self, batch, current_timestep):
-        obs, act, rew, next_obs, done = map(np.array, zip(*batch))
-        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        next_obs = torch.tensor(next_obs, dtype=torch.float32).to(self.device)
-
-        act = torch.tensor(act, dtype=torch.long, device=self.device)
-        rew = torch.tensor(rew, dtype=torch.float32, device=self.device)
-        done = torch.tensor(done, dtype=torch.float32, device=self.device)
+        obs      = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
+        next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
+        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
+        rew      = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)
+        done     = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
 
         q_vals = self.q_net(obs)
         q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)

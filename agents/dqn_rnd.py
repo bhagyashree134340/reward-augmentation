@@ -21,6 +21,7 @@ import customised_doorkey
 from networks.ddqn import DDQN
 from utils.stats import EpisodeStats
 import logging
+from cpprb import ReplayBuffer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -155,7 +156,18 @@ class DQN_RNDAgent:
         self.batch_size = dqn_cfg.batch_size
         self.target_update_freq = dqn_cfg.target_update_freq
 
-        self.replay_buffer = deque(maxlen=dqn_cfg.replay_buffer_size)
+        # self.replay_buffer = deque(maxlen=dqn_cfg.replay_buffer_size)
+        self.replay_buffer = ReplayBuffer(
+            dqn_cfg.replay_buffer_size,
+            env_dict={
+                "obs":      {"shape": self.obs_shape_torch, "dtype": np.uint8},
+                "act":      {"shape": 1,                    "dtype": np.int16},
+                "ext_rew":  {"shape": 1,                    "dtype": np.float32},
+                "int_rew":  {"shape": 1,                    "dtype": np.float32}, 
+                "done":     {"shape": 1,                    "dtype": np.bool_},
+                "next_obs": {"shape": self.obs_shape_torch, "dtype": np.uint8},
+            },
+        )
 
         self.rnd_cfg = rnd_cfg
         self.intrinsic_coef = rnd_cfg.intrinsic_coef
@@ -227,6 +239,11 @@ class DQN_RNDAgent:
 
             done = truncated or terminated
 
+            if ext_reward > 0:
+                wandb.log({
+                    "ext_rew": ext_reward
+                }, step=current_timestep)
+
             next_obs_tensor = torch.tensor(next_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             int_reward_tensor = self.compute_intrinsic_reward(next_obs_tensor)
             int_reward = int_reward_tensor.item()
@@ -241,7 +258,15 @@ class DQN_RNDAgent:
             avg_int_rewards.append(norm_int_reward)
             avg_ext_rewards.append(ext_reward)
 
-            self.replay_buffer.append((obs, action, ext_reward, norm_int_reward, next_obs, done))
+            # self.replay_buffer.append((obs, action, ext_reward, norm_int_reward, next_obs, done))
+            self.replay_buffer.add(
+                obs=obs,
+                act=action,
+                ext_rew=ext_reward,
+                int_rew=norm_int_reward,   
+                done=done,
+                next_obs=next_obs,
+            )
 
             mask_prob = getattr(self.rnd_cfg, 'rnd_mask_prob', 0.25)
             if current_timestep > self.rnd_cfg.learning_starts:
@@ -261,8 +286,8 @@ class DQN_RNDAgent:
                     forward_loss.backward()
                     self.rnd_optimizer.step()
 
-            if current_timestep > self.rnd_cfg.learning_starts and len(self.replay_buffer) >= self.batch_size:
-                batch = random.sample(self.replay_buffer, self.batch_size)
+            if current_timestep > self.rnd_cfg.learning_starts and self.replay_buffer.get_stored_size() >= self.batch_size:
+                batch = self.replay_buffer.sample(self.batch_size)
                 self.update_dqn(batch)
 
             if current_timestep % 1000 == 0 and current_timestep > 0:
@@ -316,14 +341,16 @@ class DQN_RNDAgent:
                     evaluate_dqn(self, self.env, current_timestep, save_dir="eval_rnd")
 
     def update_dqn(self, batch):
-        obs, act, ext_rew, int_rew, next_obs, done = map(np.array, zip(*batch))
-        
-        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        next_obs = torch.tensor(next_obs, dtype=torch.float32).to(self.device)
-        act = torch.tensor(act, dtype=torch.long, device=self.device)
-        ext_rew = torch.tensor(ext_rew, dtype=torch.float32, device=self.device)
-        int_rew = torch.tensor(int_rew, dtype=torch.float32, device=self.device)
-        done = torch.tensor(done, dtype=torch.float32, device=self.device)
+        # cpprb returns numpy arrays with shapes:
+        # obs: (B, C, H, W) uint8, next_obs: same
+        # act/ext_rew/int_rew/done: (B, 1)
+        obs      = torch.tensor(batch["obs"],      dtype=torch.float32, device=self.device) / 255.0
+        next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
+
+        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
+        ext_rew  = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(self.device)
+        int_rew  = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(self.device)
+        done     = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
 
         total_rew = self.extrinsic_coef * ext_rew + self.intrinsic_coef * int_rew
 
@@ -333,10 +360,8 @@ class DQN_RNDAgent:
         with torch.no_grad():
             next_q_vals = self.q_net(next_obs)
             next_actions = next_q_vals.argmax(1)
-
             target_q_vals = self.target_q_net(next_obs)
             max_next_q_vals = target_q_vals.gather(1, next_actions.unsqueeze(1)).squeeze(1)
-
             target = total_rew + (1 - done) * self.gamma * max_next_q_vals
 
         loss = F.mse_loss(q_val, target)
@@ -362,7 +387,7 @@ def main():
     env = gym.make(
     "Fixed-DoorKey-6x6-v0",
     disable_env_checker=True,
-    render_mode="human",
+    render_mode="rgb_array",
     key_pos=(1, 4),
     door_pos=(3, 3),
     goal_pos=(4, 3),
@@ -370,7 +395,7 @@ def main():
     )
     env = customised_doorkey.NoDropWrapper(env)
     env = FullyObsWrapper(env)
-    env = RGBImgObsWrapper(env, tile_size=8)
+    env = RGBImgObsWrapper(env, tile_size=4)
     env = ImgObsWrapper(env)
 
     eval_env = gym.make(
@@ -383,7 +408,7 @@ def main():
     )
     eval_env = customised_doorkey.NoDropWrapper(eval_env)
     eval_env = FullyObsWrapper(eval_env)
-    eval_env = RGBImgObsWrapper(eval_env, tile_size=8)
+    eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
     eval_env = ImgObsWrapper(eval_env)
     
     max_episode_steps = 250

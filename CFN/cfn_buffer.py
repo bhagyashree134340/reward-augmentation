@@ -6,78 +6,92 @@ from cpprb import PrioritizedReplayBuffer
 from CFN.priority_util import compute_cfn_priority
 
 
+from cpprb import PrioritizedReplayBuffer
+import numpy as np
+import torch
+
 class CFNReplayBufferWrapper:
     def __init__(self, size, obs_shape, coin_flip_dim, alpha=0.5):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        # Store obs compactly as uint8 (CHW). coin_flip stays float32.
         self.buffer = PrioritizedReplayBuffer(
             size,
             env_dict={
-                "obs": {"shape": obs_shape, "dtype": np.float32},
-                "coin_flip": {"shape": (coin_flip_dim,), "dtype": np.float32},
-            }
+                "obs":       {"shape": obs_shape,              "dtype": np.uint8},
+                "coin_flip": {"shape": (coin_flip_dim,),       "dtype": np.float32},
+            },
+            # you can also pass alpha here if you want (cpprb default is 0.6):
+            # alpha=alpha
         )
 
         self.size = size
         self.alpha = alpha
 
-        # counter tracking
+        # Track how many times a slot has been sampled (for your priority scheme)
         self.counters = np.zeros(size, dtype=np.float32)
-        self.next_idx = 0
+        self.next_idx = 0  # assume FIFO ring like cpprb uses
 
     def get_stored_size(self):
         return self.buffer.get_stored_size()
 
     def add(self, obs, coin_flip, priority):
+        """
+        obs: np.uint8 (C,H,W) in [0,255]
+        coin_flip: np.float32 shape (coin_flip_dim,)
+        """
+        if obs.dtype != np.uint8:
+            obs = obs.astype(np.uint8, copy=False)
+        if coin_flip.dtype != np.float32:
+            coin_flip = coin_flip.astype(np.float32, copy=False)
+
         self.buffer.add(obs=obs, coin_flip=coin_flip, priority=priority)
 
-        # Maintain counters aligned with internal buffer
-        self.counters[self.next_idx] = 0
+        self.counters[self.next_idx] = 0.0
         self.next_idx = (self.next_idx + 1) % self.size
 
     def sample(self, batch_size):
-        return self.buffer.sample(batch_size)
+        sample = self.buffer.sample(batch_size)
+        sample["obs"] = (sample["obs"].astype(np.float32) / 255.0)
+        return sample
 
     def sample_with_indices(self, batch_size):
         sample = self.buffer.sample(batch_size)
         indices = sample["indexes"]
 
-        obs_batch = torch.tensor(sample["obs"], dtype=torch.float32, device=self.device)
-        coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32, device=self.device)
-
+        obs_batch = torch.tensor(sample["obs"].astype(np.float32) / 255.0,
+                                 dtype=torch.float32, device=self.device)
+        coin_flip_batch = torch.tensor(sample["coin_flip"],
+                                       dtype=torch.float32, device=self.device)
         return obs_batch, coin_flip_batch, indices
 
     def update_priorities(self, indices, obs_batch, cfn, coin_flip_dim):
         for idx in indices:
-            self.counters[idx] += 1
+            self.counters[idx] += 1.0
 
-        counts = torch.tensor([self.counters[i] for i in indices], dtype=torch.float32)
+        counts = torch.tensor([self.counters[i] for i in indices],
+                              dtype=torch.float32, device=obs_batch.device)
 
         new_priorities = compute_cfn_priority(cfn, obs_batch, counts, coin_flip_dim, alpha=self.alpha)
-        new_priorities_np = new_priorities.detach().cpu().numpy()
-
-        self.buffer.update_priorities(indices, new_priorities_np)
+        self.buffer.update_priorities(indices, new_priorities.detach().cpu().numpy())
 
     def sample_and_update_priorities(self, batch_size, cfn, coin_flip_dim, use_cfn_priority):
         sample = self.buffer.sample(batch_size)
         indices = sample["indexes"]
 
-        # Get tensors
-        obs_batch = torch.tensor(sample["obs"], dtype=torch.float32, device=self.device)
-        coin_flip_batch = torch.tensor(sample["coin_flip"], dtype=torch.float32, device=self.device)
+        obs_batch = torch.tensor(sample["obs"].astype(np.float32) / 255.0,
+                                 dtype=torch.float32, device=self.device)
+        coin_flip_batch = torch.tensor(sample["coin_flip"],
+                                       dtype=torch.float32, device=self.device)
 
         if use_cfn_priority:
             for idx in indices:
-                self.counters[idx] += 1
+                self.counters[idx] += 1.0
 
-            counts = torch.tensor([self.counters[i] for i in indices], dtype=torch.float32)
-
-            # Compute new priorities
+            counts = torch.tensor([self.counters[i] for i in indices],
+                                  dtype=torch.float32, device=self.device)
             new_priorities = compute_cfn_priority(cfn, obs_batch, counts, coin_flip_dim, alpha=self.alpha)
-            new_priorities_np = new_priorities.detach().cpu().numpy()
-
-            # Update priorities in buffer
-            self.buffer.update_priorities(indices, new_priorities_np)
+            self.buffer.update_priorities(indices, new_priorities.detach().cpu().numpy())
 
         return obs_batch, coin_flip_batch, indices
 

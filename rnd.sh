@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH -p aisdlc_gpu-rtx2080     
-#SBATCH --gres=gpu:1                
-#SBATCH --mem=8000              
+#SBATCH --gres=gpu:1                             
 #SBATCH -t 0-20:00                  
 #SBATCH -c 1                        
 #SBATCH -o log/rnd.%j.out         # STDOUT log (job ID in filename)
