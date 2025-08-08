@@ -15,6 +15,7 @@ from collections import deque
 from hydra.core.hydra_config import HydraConfig
 import random
 import gymnasium as gym
+import customised_doorkey
 
 from CFN.CFN import CoinFlipNetwork, CoinFlipNetworkCNN
 from CFN.cfn_buffer import CFNReplayBufferWrapper
@@ -291,7 +292,7 @@ class DQN_CFNAgent:
             }, step=current_timestep)
 
 
-from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
+from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
 
 def log_intrinsic_reward_per_feature_from_obs(agent, obs_tensor, step=None):
     """
@@ -391,22 +392,38 @@ def log_intrinsic_reward_per_feature_from_obs(agent, obs_tensor, step=None):
     return stats
 
 def main():
-    ENV_NAME = "MiniGrid-DoorKey-6x6-v0"  
+    ENV_NAME = "Fixed-DoorKey-6x6-v0"  
     
     wandb.init(project="dqn", name="cfn-improved")  
 
     max_episode_steps = 250
 
-    env = gym.make(ENV_NAME, render_mode="rgb_array", max_episode_steps=max_episode_steps)
+    env = gym.make(
+    "Fixed-DoorKey-6x6-v0",
+    disable_env_checker=True,
+    render_mode="human",
+    key_pos=(1, 4),
+    door_pos=(3, 3),
+    agent_start_pos=(1, 1),   # optional but avoids assertions
+    )
     env = FullyObsWrapper(env)
+    env = RGBImgObsWrapper(env, tile_size=8)
     env = ImgObsWrapper(env)
 
-    eval_env = gym.make(ENV_NAME, render_mode="rgb_array", max_episode_steps=max_episode_steps)
+    eval_env = gym.make(
+    "Fixed-DoorKey-6x6-v0",
+    disable_env_checker=True,
+    render_mode="rgb_array",
+    key_pos=(1, 4),
+    door_pos=(3, 3),
+    agent_start_pos=(1, 1),   # optional but avoids assertions
+    )
     eval_env = FullyObsWrapper(eval_env)
+    eval_env = RGBImgObsWrapper(eval_env, tile_size=8)
     eval_env = ImgObsWrapper(eval_env)
     
 
-    total_timesteps = 1300_000
+    total_timesteps = 1000_000
 
     
     hidden_size = 256  
