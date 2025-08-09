@@ -1,87 +1,111 @@
+# evaluate_any.py
 import os
 import torch
 import gymnasium as gym
 import imageio
-import numpy as np
-from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
-from agents.dqn_vanilla import DQNAgent  # Ensure this matches your actual path
+from pathlib import Path
+from minigrid.wrappers import FullyObsWrapper, RGBImgObsWrapper, ImgObsWrapper
+from agents import customised_doorkey
+from networks.ddqn import DDQN
 
-def create_eval_gif_dqn():
-    # === Config ===
-    checkpoint_path = "checkpoints/dqn_agent_step970000.pt"
-    gif_path = "evaluate_dqn_outputs/rollout_step_970000.gif"
-    env_name = "MiniGrid-DoorKey-6x6-v0"
-    max_steps = 1250
+# ===== HARD-CODED CHECKPOINT PATH (env var override optional) =====
+CHECKPOINT_PATH = os.getenv("DQN_CKPT", "checkpoints_rnd/dqn_agent_step500000.pt")
 
-    # === Setup Env ===
-    eval_env = gym.make(env_name, render_mode="rgb_array", max_episode_steps=max_steps)
-    eval_env = FullyObsWrapper(eval_env)
-    eval_env = ImgObsWrapper(eval_env)
+# ===== ENV SETUP (must match training wrappers) =====
+def make_env():
+    env = gym.make(
+        "Fixed-DoorKey-6x6-v0",
+        disable_env_checker=True,
+        render_mode="rgb_array",
+        key_pos=(1, 4),
+        door_pos=(3, 3),
+        goal_pos=(4, 3),
+        agent_start_pos=(1, 1),
+    )
+    env = customised_doorkey.NoDropWrapper(env)
+    env = FullyObsWrapper(env)
+    env = RGBImgObsWrapper(env, tile_size=4)
+    env = ImgObsWrapper(env)
+    return env
 
-    # Dummy env for agent init
-    train_env = gym.make(env_name, render_mode="rgb_array", max_episode_steps=max_steps)
-    train_env = FullyObsWrapper(train_env)
-    train_env = ImgObsWrapper(train_env)
+def _extract_qnet_state(ckpt):
+    """
+    Accepts:
+      - {"q_net": state_dict, "target_q_net": ..., "step": ...}
+      - {"state_dict": state_dict}
+      - bare state_dict (mapping of param names -> tensors)
+    Returns:
+      - state_dict for the Q-network
+    """
+    if isinstance(ckpt, dict):
+        if "q_net" in ckpt and isinstance(ckpt["q_net"], dict):
+            return ckpt["q_net"]
+        if "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
+            return ckpt["state_dict"]
+        # Heuristic: looks like a bare state_dict
+        if all(isinstance(k, str) for k in ckpt.keys()):
+            return ckpt
+    # If someone saved a whole object with .q_net
+    if hasattr(ckpt, "q_net") and hasattr(ckpt.q_net, "state_dict"):
+        return ckpt.q_net.state_dict()
+    raise RuntimeError(f"Unrecognized checkpoint format: keys={list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}")
 
-    # === Agent Config ===
-    cfg = type("DQNConfig", (), {
-        "hidden_size": 256,
-        "lr": 1e-5,
-        "gamma": 0.99,
-        "batch_size": 128,
-        "replay_buffer_size": 1_000_000,
-        "target_update_freq": 2000,
-    })
-
-    # === Init agent ===
-    agent = DQNAgent(train_env, eval_env, env_name, cfg)
+def load_model(env, checkpoint_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent.device = device
-    agent.q_net.to(device)
+    obs_shape = env.observation_space.shape     # H, W, C
+    obs_shape_torch = (obs_shape[2], obs_shape[0], obs_shape[1])  # C, H, W
+    act_dim = env.action_space.n
 
-    # === Load q_net from checkpoint dict ===
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    agent.q_net.load_state_dict(checkpoint["q_net"])
-    agent.q_net.eval()
+    model = DDQN(obs_shape_torch, act_dim, hidden_size=128, is_cnn=True).to(device)
 
-    # === Rollout ===
-    obs_raw, _ = eval_env.reset()
-    obs = agent.process_obs(obs_raw)
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = _extract_qnet_state(ckpt)
+
+    # Handle possible "module." prefixes if saved under DataParallel
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+    return model, device
+
+def run_episode_gif(env, model, device, filename):
     frames = []
+    obs, _ = env.reset()
+    obs = obs.transpose(2, 0, 1)  # HWC -> CHW
     done = False
-
-    for step in range(max_steps):
-        frame = eval_env.render()
+    while not done:
+        frame = env.render()
         frames.append(frame)
 
-        # Debug print: current position or step info
-        if hasattr(eval_env, "agent_pos"):
-            print(f"Step {step} | Agent position: {eval_env.agent_pos}")
-        else:
-            print(f"Step {step}")
-
-        # Process obs and act
-        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0) / 255.0
         with torch.no_grad():
-            q_values = agent.q_net(obs_tensor)
-            action = torch.argmax(q_values, dim=1).item()
+            action = model(obs_tensor).argmax(dim=1).item()
 
-        print(f"Action taken: {action}")
+        obs_next, _, terminated, truncated, _ = env.step(action)
+        obs = obs_next.transpose(2, 0, 1)
+        done = terminated or truncated
 
-        next_obs_raw, reward, terminated, truncated, info = eval_env.step(action)
-        obs = agent.process_obs(next_obs_raw)
+    frame = env.render()
+    frames.append(frame)
 
-        if terminated or truncated:
-            final_frame = eval_env.render()
-            frames.append(final_frame)
-            print(f"Episode ended at step {step} (terminated={terminated}, truncated={truncated})")
-            break
+    imageio.mimsave(filename, frames, duration=0.08)  # ~12.5 FPS
 
-    # === Save GIF ===
-    os.makedirs(os.path.dirname(gif_path), exist_ok=True)
-    imageio.mimsave(gif_path, frames, fps=10)
-    print(f"[GIF] Saved rollout to {gif_path}")
+def main():
+    print(f"Loading checkpoint from: {CHECKPOINT_PATH}")
+    # Base env for shape/model
+    base_env = make_env()
+    model, device = load_model(base_env, CHECKPOINT_PATH)
 
+    save_dir = Path("evaluate_dqn_outputs")
+    for i in range(5):
+        env = make_env()
+        gif_path = save_dir / f"minigrid_rnd_{i}.gif"
+        run_episode_gif(env, model, device, gif_path)
+        print(f"Saved {gif_path}")
+        env.close()
+
+    base_env.close()
 
 if __name__ == "__main__":
-    create_eval_gif_dqn()
+    main()

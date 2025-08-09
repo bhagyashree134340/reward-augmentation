@@ -244,11 +244,11 @@ class DQN_RNDAgent:
         ep_mean_intrinsic = ep_sum / denom
         return ep_mean_intrinsic, ep_cnt
 
-    def plot_intrinsic_vs_true_bonus_heatmap_minigrid(self, save_dir="plots"):
+    def plot_intrinsic_vs_true_bonus_heatmap_minigrid(self, current_timestep, save_dir="plots"):
         H, W = self.visit_counts.shape
         save_path = Path(save_dir)
         save_path.mkdir(parents=True, exist_ok=True)
-        out = save_path / f"minigrid_rnd_vs_true_bonus_{H}x{W}.png"
+        out = save_path / f"minigrid_rnd_vs_true_bonus_{H}x{W}_{current_timestep}.png"
 
         # 1) Build episode map
         ep_mean_intrinsic, ep_cnt = self.build_episode_intrinsic_map()
@@ -259,7 +259,7 @@ class DQN_RNDAgent:
 
         visited_mask = (true_counts > 0)
         masked_true_bonus = true_bonus[visited_mask]
-        masked_rnd_bonus  = ep_mean_intrinsic[visited_mask]
+        # masked_rnd_bonus  = ep_mean_intrinsic[visited_mask]
 
         # 3) Plot
         fig, axs = plt.subplots(1, 3, figsize=(12, 4))
@@ -272,7 +272,7 @@ class DQN_RNDAgent:
             ax.set_xticks(range(W)); ax.set_yticks(range(H))
             fig.colorbar(im, ax=ax)
 
-        axs[2].scatter(masked_true_bonus.ravel(), masked_rnd_bonus.ravel(), s=12)
+        axs[2].scatter(masked_true_bonus.ravel(), ep_mean_intrinsic.ravel(), s=12)
         axs[2].set_xlabel("True Bonus (1/sqrt(N))")
         axs[2].set_ylabel("RND Bonus (normalized)")
         axs[2].set_title("True vs. Approx Bonus")
@@ -444,8 +444,11 @@ class DQN_RNDAgent:
                 episode_num += 1
 
             if current_timestep % 10000 == 0 and current_timestep > 0:
-                    validate_dqn(self, current_timestep, save_dir="checkpoints_rnd")
-                    evaluate_dqn(self, self.env, current_timestep, save_dir="eval_rnd")
+                validate_dqn(self, current_timestep, save_dir="checkpoints_rnd")
+                evaluate_dqn(self, self.env, current_timestep, save_dir="eval_rnd")
+
+            if current_timestep % 50000 == 0:
+                self.plot_intrinsic_vs_true_bonus_heatmap_minigrid(current_timestep)
 
     def update_dqn(self, batch):
         # cpprb returns numpy arrays with shapes:
@@ -499,13 +502,14 @@ def main():
     # eval_env = ImgObsWrapper(eval_env)
 
     env = gym.make(
-    "Fixed-DoorKey-6x6-v0",
-    disable_env_checker=True,
-    render_mode="rgb_array",
-    key_pos=(1, 4),
-    door_pos=(3, 3),
-    goal_pos=(4, 3),
-    agent_start_pos=(1, 1),
+        "Fixed-DoorKey-v0",           # generic registration
+        size=16,
+        disable_env_checker=True,
+        render_mode="rgb_array",
+        key_pos=(1, 14),              # bottom-left interior
+        door_pos=(8, 8),              # middle of vertical wall
+        goal_pos=(14, 14),            # bottom-right interior
+        agent_start_pos=(1, 1),       # top-left interior
     )
     env = customised_doorkey.NoDropWrapper(env)
     env = FullyObsWrapper(env)
@@ -513,12 +517,14 @@ def main():
     env = ImgObsWrapper(env)
 
     eval_env = gym.make(
-    "Fixed-DoorKey-6x6-v0",
-    disable_env_checker=True,
-    render_mode="rgb_array",
-    key_pos=(1, 4),
-    door_pos=(3, 3),
-    agent_start_pos=(1, 1),   # optional but avoids assertions
+        "Fixed-DoorKey-v0",           # generic registration
+        size=16,
+        disable_env_checker=True,
+        render_mode="rgb_array",
+        key_pos=(1, 14),              # bottom-left interior
+        door_pos=(8, 8),              # middle of vertical wall
+        goal_pos=(14, 14),            # bottom-right interior
+        agent_start_pos=(1, 1),       # top-left interior
     )
     eval_env = customised_doorkey.NoDropWrapper(eval_env)
     eval_env = FullyObsWrapper(eval_env)
@@ -526,7 +532,7 @@ def main():
     eval_env = ImgObsWrapper(eval_env)
     
     max_episode_steps = 250
-    total_timesteps = 1000
+    total_timesteps = 500_000
 
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 128,
@@ -562,7 +568,7 @@ def main():
     print(f"Training finished in {(end - start) / 60:.2f} minutes.")
 
     agent.print_visit_counts()
-    agent.plot_intrinsic_vs_true_bonus_heatmap_minigrid()
+    # agent.plot_intrinsic_vs_true_bonus_heatmap_minigrid()
 
 if __name__ == "__main__":
     main()
