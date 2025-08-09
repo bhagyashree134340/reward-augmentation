@@ -74,8 +74,8 @@ class CoinFlipNetworkCNN(nn.Module):
         obs = obs.to(self.device)
         if obs.dtype == torch.uint8:
             obs = obs.float() / 255.0
-        elif obs.max() > 1.0:
-            obs = obs / 255.0
+        # elif obs.max() > 1.0:
+        #     obs = obs / 255.0
 
         net_features = self.net_encoder(obs)
         net_output = self.net_head(net_features)

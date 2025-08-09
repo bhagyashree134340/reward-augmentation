@@ -27,6 +27,7 @@ from utils.stats import EpisodeStats
 from networks.ddqn import DDQN 
 import logging
 from cpprb import ReplayBuffer
+from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,7 +118,8 @@ class DQN_CFNAgent:
     def act(self, obs, epsilon):
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
-        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        # Normalize observations consistently with training
+        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
         return q_values.argmax().item()
@@ -180,7 +182,7 @@ class DQN_CFNAgent:
                 }, step=current_timestep)
 
                 
-                log_intrinsic_reward_per_feature_from_obs(self, obs_tensor, step=current_timestep)
+                # log_intrinsic_reward_per_feature_from_obs(self, obs_tensor, step=current_timestep)
 
             self.cfn(obs_tensor, update_prior_stats=True)
 
@@ -308,105 +310,6 @@ class DQN_CFNAgent:
                 "training/cfn_loss": cfn_loss.item(),
             }, step=current_timestep)
 
-
-from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
-
-def log_intrinsic_reward_per_feature_from_obs(agent, obs_tensor, step=None):
-    """
-    Analyze intrinsic reward per object, color, and door state from a single observation.
-
-    Args:
-        agent: The RL agent with CFN and coin_flip_dim
-        obs_tensor: torch.Tensor of shape (1, C, H, W), preprocessed observation
-        raw_obs: np.ndarray of shape (H, W, 3), MiniGrid encoded obs with (object, color, state)
-        step: Optional wandb step for logging
-
-    Returns:
-        Dictionary with average intrinsic reward per feature (object, color, state)
-    """
-
-    raw_obs = agent.env.unwrapped.grid.encode()
-
-    # MiniGrid encodings
-    OBJECT_TO_IDX = {
-        "unseen": 0, "empty": 1, "wall": 2, "floor": 3, "door": 4,
-        "key": 5, "ball": 6, "box": 7, "goal": 8, "lava": 9, "agent": 10,
-    }
-    COLOR_TO_IDX = {
-        "red": 0, "green": 1, "blue": 2, "purple": 3, "yellow": 4, "grey": 5,
-    }
-    STATE_TO_IDX = {
-        "open": 0, "closed": 1, "locked": 2,
-    }
-
-    # Inverse mappings for readability
-    IDX_TO_OBJECT = {v: k for k, v in OBJECT_TO_IDX.items()}
-    IDX_TO_COLOR = {v: k for k, v in COLOR_TO_IDX.items()}
-    IDX_TO_STATE = {v: k for k, v in STATE_TO_IDX.items()}
-
-    NUM_OBJECTS = len(OBJECT_TO_IDX)
-    NUM_COLORS = len(COLOR_TO_IDX)
-    NUM_STATES = len(STATE_TO_IDX)
-
-    # Extract raw maps
-    obj_map = raw_obs[:, :, 0]
-    color_map = raw_obs[:, :, 1]
-    state_map = raw_obs[:, :, 2]
-
-    # Compute total intrinsic reward for this obs
-    with torch.no_grad():
-        output = agent.cfn(obs_tensor.to(agent.device), update_prior_stats=False)
-        norm = output.norm(p=2, dim=1).item()
-        intrinsic = agent.coin_flip_dim / (norm ** 2 + 1e-8)
-
-    # Init accumulation buffers
-    obj_intrinsic = np.zeros(NUM_OBJECTS)
-    obj_counts = np.zeros(NUM_OBJECTS)
-    color_intrinsic = np.zeros(NUM_COLORS)
-    color_counts = np.zeros(NUM_COLORS)
-    state_intrinsic = np.zeros(NUM_STATES)
-    state_counts = np.zeros(NUM_STATES)
-
-    # Accumulate per feature
-    H, W = obj_map.shape
-    for x in range(H):
-        for y in range(W):
-            obj_id = obj_map[x, y]
-            color_id = color_map[x, y]
-            state_id = state_map[x, y]
-
-            if obj_id < NUM_OBJECTS:
-                obj_intrinsic[obj_id] += intrinsic
-                obj_counts[obj_id] += 1
-            if color_id < NUM_COLORS:
-                color_intrinsic[color_id] += intrinsic
-                color_counts[color_id] += 1
-            if state_id < NUM_STATES:
-                state_intrinsic[state_id] += intrinsic
-                state_counts[state_id] += 1
-
-    # Average (avoid div by 0)
-    obj_avg = np.divide(obj_intrinsic, obj_counts, out=np.zeros_like(obj_intrinsic), where=obj_counts > 0)
-    color_avg = np.divide(color_intrinsic, color_counts, out=np.zeros_like(color_intrinsic), where=color_counts > 0)
-    state_avg = np.divide(state_intrinsic, state_counts, out=np.zeros_like(state_intrinsic), where=state_counts > 0)
-
-    # Convert to readable dict
-    stats = {
-        "object": {IDX_TO_OBJECT[i]: obj_avg[i] for i in range(NUM_OBJECTS) if obj_counts[i] > 0},
-        "color": {IDX_TO_COLOR[i]: color_avg[i] for i in range(NUM_COLORS) if color_counts[i] > 0},
-        "state": {IDX_TO_STATE[i]: state_avg[i] for i in range(NUM_STATES) if state_counts[i] > 0},
-    }
-
-    # Optional wandb log
-    if step is not None:
-        log_dict = {
-            f"int_reward/{ftype}/{fname}": val
-            for ftype, subdict in stats.items()
-            for fname, val in subdict.items()
-        }
-        wandb.log(log_dict, step=step)
-
-    return stats
 
 def main():
     ENV_NAME = "Fixed-DoorKey-6x6-v0"  

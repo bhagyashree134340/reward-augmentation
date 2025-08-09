@@ -1,6 +1,8 @@
 import sys
 import os
 
+from matplotlib import pyplot as plt
+
 from utils.evaluate import evaluate_dqn
 from utils.validate import validate_dqn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -138,6 +140,10 @@ class DQN_RNDAgent:
         self.obs_shape = env.observation_space.shape  
         act_dim = env.action_space.n
 
+        h = self.env.unwrapped.grid.height
+        w = self.env.unwrapped.grid.width
+        self.visit_counts = np.zeros((h - 2, w - 2), dtype=np.int32)
+
         print("Original obs shape:", env.observation_space.shape)
         
         if len(self.obs_shape) == 3:
@@ -181,6 +187,102 @@ class DQN_RNDAgent:
         self.reward_rms = RunningMeanStd()
         self.reward_filter = RewardForwardFilter(gamma=0.99)
 
+    def _agent_rc(self):
+        x, y = map(int, self.env.unwrapped.agent_pos)
+        return (y - 1), (x - 1)
+    
+    def build_episode_intrinsic_map(self):
+        """Run ONE eval episode, collect mean normalized intrinsic reward per interior cell."""
+        H, W = self.visit_counts.shape
+        ep_sum = np.zeros((H, W), dtype=np.float64)
+        ep_cnt = np.zeros((H, W), dtype=np.int32)
+
+        obs_raw, _ = self.eval_env.reset()
+        obs = self.process_obs(obs_raw)
+
+        done = False
+        steps = 0
+        # ε-greedy with mild exploration so we visit more cells
+        epsilon_eval = 0.2
+
+        while not done and steps < 1000:
+            # compute RND int reward for CURRENT obs (or next_obs — your choice; keep consistent)
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+
+            # normalize like in training
+            obs_np = obs_tensor.cpu().numpy()
+            self.obs_rms.update(obs_np)  # optional: comment out if you want *frozen* stats
+            obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
+            obs_std  = torch.sqrt(torch.from_numpy(self.obs_rms.var).float().to(self.device) + 1e-8)
+            norm_obs = (obs_tensor - obs_mean) / obs_std
+
+            with torch.no_grad():
+                pred, tgt = self.rnd(norm_obs)
+                bonus = 0.5 * ((pred - tgt) ** 2).sum().item()
+
+            norm_int_reward = bonus / np.sqrt(self.reward_rms.var + 1e-8)
+
+            # bin to interior cell
+            ry, rx = self._agent_rc()
+            ep_sum[ry, rx] += norm_int_reward
+            ep_cnt[ry, rx] += 1
+
+            # act
+            if np.random.rand() < epsilon_eval:
+                action = self.eval_env.action_space.sample()
+            else:
+                with torch.no_grad():
+                    q = self.q_net(obs_tensor / 255.0)
+                    action = q.argmax(1).item()
+
+            next_obs_raw, _, terminated, truncated, _ = self.eval_env.step(action)
+            obs = self.process_obs(next_obs_raw)
+            done = terminated or truncated
+            steps += 1
+
+        denom = np.maximum(1, ep_cnt)
+        ep_mean_intrinsic = ep_sum / denom
+        return ep_mean_intrinsic, ep_cnt
+
+    def plot_intrinsic_vs_true_bonus_heatmap_minigrid(self, save_dir="plots"):
+        H, W = self.visit_counts.shape
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        out = save_path / f"minigrid_rnd_vs_true_bonus_{H}x{W}.png"
+
+        # 1) Build episode map
+        ep_mean_intrinsic, ep_cnt = self.build_episode_intrinsic_map()
+
+        # 2) Global true bonus from training counts
+        true_counts = self.visit_counts
+        true_bonus = 1.0 / np.sqrt(true_counts + 1e-8)
+
+        visited_mask = (true_counts > 0)
+        masked_true_bonus = true_bonus[visited_mask]
+        masked_rnd_bonus  = ep_mean_intrinsic[visited_mask]
+
+        # 3) Plot
+        fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+        cmaps  = ["magma", "magma"]
+        titles = ["True Bonus (1/sqrt(N))", "RND Bonus (mean per cell, ep)"]
+
+        for ax, data, title, cmap in zip(axs[:2], [true_bonus, ep_mean_intrinsic], titles, cmaps):
+            im = ax.imshow(data, cmap=cmap, interpolation="nearest")
+            ax.set_title(title)
+            ax.set_xticks(range(W)); ax.set_yticks(range(H))
+            fig.colorbar(im, ax=ax)
+
+        axs[2].scatter(masked_true_bonus.ravel(), masked_rnd_bonus.ravel(), s=12)
+        axs[2].set_xlabel("True Bonus (1/sqrt(N))")
+        axs[2].set_ylabel("RND Bonus (normalized)")
+        axs[2].set_title("True vs. Approx Bonus")
+        axs[2].grid(True)
+
+        plt.tight_layout()
+        plt.savefig(out)
+        plt.close()
+        print(f"Heatmap and scatter plot saved to {out}")
+
     def process_obs(self, obs):
         if isinstance(obs, dict) and 'image' in obs:
             obs = obs['image']
@@ -223,6 +325,9 @@ class DQN_RNDAgent:
         episode_num = 0
         obs_raw, _ = self.env.reset()
         obs = self.process_obs(obs_raw)
+
+        ry, rx = self._agent_rc()
+        self.visit_counts[ry, rx] += 1
         avg_rewards = []
         avg_int_rewards = []
         avg_ext_rewards = []
@@ -236,6 +341,9 @@ class DQN_RNDAgent:
 
             next_obs_raw, ext_reward, terminated, truncated, _ = self.env.step(action)
             next_obs = self.process_obs(next_obs_raw)
+
+            ry, rx = self._agent_rc()
+            self.visit_counts[ry, rx] += 1
 
             done = truncated or terminated
 
@@ -308,9 +416,6 @@ class DQN_RNDAgent:
             if current_timestep % self.target_update_freq == 0:
                 self.target_q_net.load_state_dict(self.q_net.state_dict())
 
-            if current_timestep % 50000 == 0 and current_timestep > 0:
-                print(f"\n--- Evaluation at step {current_timestep} ---")
-
             if done or episode_step >= max_episode_steps:
                 stats.episode_rewards.append(episode_return)
                 stats.episode_lengths.append(episode_step)
@@ -332,6 +437,8 @@ class DQN_RNDAgent:
 
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
+                ry, rx = self._agent_rc()
+                self.visit_counts[ry, rx] += 1
                 episode_return = 0
                 episode_step = 0
                 episode_num += 1
@@ -369,8 +476,15 @@ class DQN_RNDAgent:
         loss.backward()
         self.optimizer.step()
 
+    def print_visit_counts(self):
+        print("\nTrue visit counts:")
+        for row in self.visit_counts:
+            print(" ".join(f"{v:4d}" for v in row))
+
 
 from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
+
+
 
 def main():
     wandb.init(project="dqn", name="rnd")
@@ -391,7 +505,7 @@ def main():
     key_pos=(1, 4),
     door_pos=(3, 3),
     goal_pos=(4, 3),
-    agent_start_pos=(1, 1),   # optional but avoids assertions
+    agent_start_pos=(1, 1),
     )
     env = customised_doorkey.NoDropWrapper(env)
     env = FullyObsWrapper(env)
@@ -412,7 +526,7 @@ def main():
     eval_env = ImgObsWrapper(eval_env)
     
     max_episode_steps = 250
-    total_timesteps = 1300_000
+    total_timesteps = 1000
 
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 128,
@@ -446,6 +560,9 @@ def main():
     agent.train(total_timesteps=total_timesteps, max_episode_steps=max_episode_steps)
     end = time.time()
     print(f"Training finished in {(end - start) / 60:.2f} minutes.")
+
+    agent.print_visit_counts()
+    agent.plot_intrinsic_vs_true_bonus_heatmap_minigrid()
 
 if __name__ == "__main__":
     main()
