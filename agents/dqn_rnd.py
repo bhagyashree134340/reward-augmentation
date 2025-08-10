@@ -445,7 +445,7 @@ class DQN_RNDAgent:
 
             if current_timestep % 10000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_rnd")
-                evaluate_dqn(self, self.env, current_timestep, save_dir="eval_rnd")
+                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="eval_rnd")
 
             if current_timestep % 50000 == 0:
                 self.plot_intrinsic_vs_true_bonus_heatmap_minigrid(current_timestep)
@@ -531,8 +531,8 @@ def main():
     eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
     eval_env = ImgObsWrapper(eval_env)
     
-    max_episode_steps = 250
-    total_timesteps = 500_000
+    max_episode_steps = 1800
+    total_timesteps = 1_300_000
 
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 128,
