@@ -120,11 +120,7 @@ class RNDModel(nn.Module):
         return layer
 
     def forward(self, obs):
-        if obs.dtype == torch.uint8:
-            obs = obs.float() / 255.0
-        elif obs.max() > 1.0:
-            obs = obs / 255.0
-            
+        # Expect obs to already be normalized to [0, 1] range
         target_output = self.target(obs)
         predictor_output = self.predictor(obs)
         return predictor_output, target_output
@@ -162,7 +158,6 @@ class DQN_RNDAgent:
         self.batch_size = dqn_cfg.batch_size
         self.target_update_freq = dqn_cfg.target_update_freq
 
-        # self.replay_buffer = deque(maxlen=dqn_cfg.replay_buffer_size)
         self.replay_buffer = ReplayBuffer(
             dqn_cfg.replay_buffer_size,
             env_dict={
@@ -182,7 +177,7 @@ class DQN_RNDAgent:
         self.rnd = RNDModel(self.obs_shape_torch).to(self.device)
         self.rnd_optimizer = torch.optim.Adam(self.rnd.predictor.parameters(), lr=rnd_cfg.lr)
 
-        obs_dim = np.prod(self.obs_shape_torch)
+        # Initialize RMS for normalized observations (already in [0, 1] range)
         self.obs_rms = RunningMeanStd(shape=self.obs_shape_torch)
         self.reward_rms = RunningMeanStd()
         self.reward_filter = RewardForwardFilter(gamma=0.99)
@@ -191,8 +186,60 @@ class DQN_RNDAgent:
         x, y = map(int, self.env.unwrapped.agent_pos)
         return (y - 1), (x - 1)
     
+    def process_obs(self, obs):
+        """
+        Process raw observation to consistent format.
+        Always returns uint8 in CHW format, values in [0, 255] range.
+        """
+        if isinstance(obs, dict) and 'image' in obs:
+            obs = obs['image']
+        
+        obs = np.array(obs, dtype=np.uint8)
+        
+        if len(obs.shape) == 3:
+            obs = np.transpose(obs, (2, 0, 1))  # HWC -> CHW
+        else:
+            raise ValueError(f"Unexpected observation shape: {obs.shape}")
+            
+        return obs
+    
+    def obs_to_float_tensor(self, obs):
+        """
+        Convert uint8 observation to float32 tensor on device.
+        obs should be uint8 numpy array in CHW format.
+        Returns tensor in [0, 1] range.
+        """
+        if isinstance(obs, np.ndarray):
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
+        else:
+            obs_tensor = obs.to(dtype=torch.float32, device=self.device)
+        
+        # Normalize to [0, 1]
+        if obs_tensor.max() > 1.0:
+            obs_tensor = obs_tensor / 255.0
+            
+        return obs_tensor
+    
+    def update_obs_rms(self, obs):
+        """
+        Update observation RMS with normalized observation.
+        obs should be uint8 numpy array in CHW format.
+        """
+        # Convert to float and normalize
+        obs_float = obs.astype(np.float32) / 255.0
+        # Update RMS with batch dimension
+        self.obs_rms.update(obs_float[None, ...])
+    
+    def normalize_obs_with_rms(self, obs_tensor):
+        """
+        Apply RMS normalization to observation tensor.
+        obs_tensor should be float32 tensor in [0, 1] range.
+        """
+        obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
+        obs_std = torch.sqrt(torch.from_numpy(self.obs_rms.var).float().to(self.device) + 1e-8)
+        return (obs_tensor - obs_mean) / obs_std
+
     def build_episode_intrinsic_map(self):
-        """Run ONE eval episode, collect mean normalized intrinsic reward per interior cell."""
         H, W = self.visit_counts.shape
         ep_sum = np.zeros((H, W), dtype=np.float64)
         ep_cnt = np.zeros((H, W), dtype=np.int32)
@@ -202,19 +249,11 @@ class DQN_RNDAgent:
 
         done = False
         steps = 0
-        # ε-greedy with mild exploration so we visit more cells
         epsilon_eval = 0.2
 
         while not done and steps < 1000:
-            # compute RND int reward for CURRENT obs (or next_obs — your choice; keep consistent)
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-
-            # normalize like in training
-            obs_np = obs_tensor.cpu().numpy()
-            self.obs_rms.update(obs_np)  # optional: comment out if you want *frozen* stats
-            obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
-            obs_std  = torch.sqrt(torch.from_numpy(self.obs_rms.var).float().to(self.device) + 1e-8)
-            norm_obs = (obs_tensor - obs_mean) / obs_std
+            obs_tensor = self.obs_to_float_tensor(obs).unsqueeze(0)
+            norm_obs = self.normalize_obs_with_rms(obs_tensor)
 
             with torch.no_grad():
                 pred, tgt = self.rnd(norm_obs)
@@ -222,17 +261,15 @@ class DQN_RNDAgent:
 
             norm_int_reward = bonus / np.sqrt(self.reward_rms.var + 1e-8)
 
-            # bin to interior cell
             ry, rx = self._agent_rc()
             ep_sum[ry, rx] += norm_int_reward
             ep_cnt[ry, rx] += 1
 
-            # act
             if np.random.rand() < epsilon_eval:
                 action = self.eval_env.action_space.sample()
             else:
                 with torch.no_grad():
-                    q = self.q_net(obs_tensor / 255.0)
+                    q = self.q_net(obs_tensor)
                     action = q.argmax(1).item()
 
             next_obs_raw, _, terminated, truncated, _ = self.eval_env.step(action)
@@ -250,91 +287,107 @@ class DQN_RNDAgent:
         save_path.mkdir(parents=True, exist_ok=True)
         out = save_path / f"minigrid_rnd_vs_true_bonus_{H}x{W}_{current_timestep}.png"
 
-        # 1) Build episode map
-        ep_mean_intrinsic, ep_cnt = self.build_episode_intrinsic_map()
+        ep_mean_intrinsic, ep_cnt = self.build_episode_intrinsic_map()  
 
-        # 2) Global true bonus from training counts
-        true_counts = self.visit_counts
-        true_bonus = 1.0 / np.sqrt(true_counts + 1e-8)
+        true_counts = self.visit_counts                              
+        true_bonus = 1.0 / np.sqrt(true_counts + 1e-8)                
 
-        visited_mask = (true_counts > 0)
-        masked_true_bonus = true_bonus[visited_mask]
-        # masked_rnd_bonus  = ep_mean_intrinsic[visited_mask]
+        train_mask = (true_counts > 0)
+        eval_mask  = (ep_cnt > 0)
+        mask = train_mask & eval_mask
 
-        # 3) Plot
         fig, axs = plt.subplots(1, 3, figsize=(12, 4))
-        cmaps  = ["magma", "magma"]
-        titles = ["True Bonus (1/sqrt(N))", "RND Bonus (mean per cell, ep)"]
+        im0 = axs[0].imshow(true_bonus, cmap="magma", interpolation="nearest")
+        axs[0].set_title("True Bonus (1/sqrt(N))")
+        axs[0].set_xticks(range(W)); axs[0].set_yticks(range(H))
+        fig.colorbar(im0, ax=axs[0])
 
-        for ax, data, title, cmap in zip(axs[:2], [true_bonus, ep_mean_intrinsic], titles, cmaps):
-            im = ax.imshow(data, cmap=cmap, interpolation="nearest")
-            ax.set_title(title)
-            ax.set_xticks(range(W)); ax.set_yticks(range(H))
-            fig.colorbar(im, ax=ax)
+        im1 = axs[1].imshow(ep_mean_intrinsic, cmap="magma", interpolation="nearest")
+        axs[1].set_title("RND Bonus (mean per cell, ep)")
+        axs[1].set_xticks(range(W)); axs[1].set_yticks(range(H))
+        fig.colorbar(im1, ax=axs[1])
 
-        axs[2].scatter(masked_true_bonus.ravel(), ep_mean_intrinsic.ravel(), s=12)
-        axs[2].set_xlabel("True Bonus (1/sqrt(N))")
-        axs[2].set_ylabel("RND Bonus (normalized)")
-        axs[2].set_title("True vs. Approx Bonus")
-        axs[2].grid(True)
+        x = true_bonus[mask].ravel()
+        y = ep_mean_intrinsic[mask].ravel()
+        if x.size > 0:
+            axs[2].scatter(x, y, s=12)
+            axs[2].set_xlabel("True Bonus (1/sqrt(N))")
+            axs[2].set_ylabel("RND Bonus (normalized)")
+            axs[2].set_title("True vs. Approx Bonus")
+            axs[2].grid(True)
+        else:
+            axs[2].text(0.5, 0.5, "No overlapping visited cells\n(train ∩ eval = ∅)",
+                        ha="center", va="center", transform=axs[2].transAxes)
+            axs[2].axis("off")
 
         plt.tight_layout()
         plt.savefig(out)
         plt.close()
         print(f"Heatmap and scatter plot saved to {out}")
 
-    def process_obs(self, obs):
-        if isinstance(obs, dict) and 'image' in obs:
-            obs = obs['image']
-        
-        obs = np.array(obs, dtype=np.uint8)
-        
-        if len(obs.shape) == 3:
-            obs = np.transpose(obs, (2, 0, 1))
-        else:
-            raise ValueError(f"Unexpected observation shape: {obs.shape}")
-            
-        return obs
-
     def act(self, obs, epsilon):
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
-        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        
+        obs_tensor = self.obs_to_float_tensor(obs).unsqueeze(0)
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
         return q_values.argmax().item()
 
     def compute_intrinsic_reward(self, obs_tensor):
+        """
+        Compute intrinsic reward for batch of observations.
+        obs_tensor should be float32 tensor in [0, 1] range.
+        """
         with torch.no_grad():
-            obs_np = obs_tensor.cpu().numpy()
-            self.obs_rms.update(obs_np)
-            
-            obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
-            obs_std = torch.sqrt(torch.from_numpy(self.obs_rms.var).float().to(self.device) + 1e-8)
-            norm_obs = (obs_tensor - obs_mean) / obs_std
-            
+            norm_obs = self.normalize_obs_with_rms(obs_tensor)
             pred, target = self.rnd(norm_obs)
             intrinsic_reward = 0.5 * ((pred - target) ** 2).sum(dim=1)
-            
             return intrinsic_reward
+
+    def _fit_obs_rms_warmup(self):
+        """Warmup phase to initialize observation RMS statistics."""
+        print("Starting observation RMS warmup...")
+        obs_raw, _ = self.env.reset()
+        obs = self.process_obs(obs_raw)
+        self.update_obs_rms(obs)
+        
+        for i in range(5000):
+            a = self.env.action_space.sample()
+            next_obs_raw, _, terminated, truncated, _ = self.env.step(a)
+            obs = self.process_obs(next_obs_raw)
+            self.update_obs_rms(obs)
+
+            if terminated or truncated:
+                obs_raw, _ = self.env.reset()
+                obs = self.process_obs(obs_raw)
+                self.update_obs_rms(obs)
+        
+        print("Observation RMS warmup completed.")
+        print(f"Obs mean: {self.obs_rms.mean.mean():.4f}, Obs std: {np.sqrt(self.obs_rms.var.mean()):.4f}")
 
     def train(self, total_timesteps, max_episode_steps):
         current_timestep = 0
         episode_return = 0
         episode_step = 0
         episode_num = 0
+        
+        # Initialize environment and RMS
         obs_raw, _ = self.env.reset()
         obs = self.process_obs(obs_raw)
+        self.update_obs_rms(obs)
 
         ry, rx = self._agent_rc()
         self.visit_counts[ry, rx] += 1
+        
         avg_rewards = []
         avg_int_rewards = []
         avg_ext_rewards = []
-
         stats = EpisodeStats([], [], [])
-
         epsilon = self.rnd_cfg.epsilon_start
+
+        # Warmup observation RMS
+        self._fit_obs_rms_warmup()
 
         while current_timestep < total_timesteps:
             action = self.act(obs, epsilon)
@@ -342,6 +395,7 @@ class DQN_RNDAgent:
             next_obs_raw, ext_reward, terminated, truncated, _ = self.env.step(action)
             next_obs = self.process_obs(next_obs_raw)
 
+            # Update visit counts
             ry, rx = self._agent_rc()
             self.visit_counts[ry, rx] += 1
 
@@ -352,10 +406,12 @@ class DQN_RNDAgent:
                     "ext_rew": ext_reward
                 }, step=current_timestep)
 
-            next_obs_tensor = torch.tensor(next_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            # Compute intrinsic reward
+            next_obs_tensor = self.obs_to_float_tensor(next_obs).unsqueeze(0)
             int_reward_tensor = self.compute_intrinsic_reward(next_obs_tensor)
             int_reward = int_reward_tensor.item()
 
+            # Update reward statistics
             discounted_r = self.reward_filter.update(int_reward)
             self.reward_rms.update(np.array([discounted_r]))
             norm_int_reward = int_reward / np.sqrt(np.maximum(self.reward_rms.var, 1e-8))
@@ -366,7 +422,7 @@ class DQN_RNDAgent:
             avg_int_rewards.append(norm_int_reward)
             avg_ext_rewards.append(ext_reward)
 
-            # self.replay_buffer.append((obs, action, ext_reward, norm_int_reward, next_obs, done))
+            # Store in replay buffer
             self.replay_buffer.add(
                 obs=obs,
                 act=action,
@@ -376,28 +432,28 @@ class DQN_RNDAgent:
                 next_obs=next_obs,
             )
 
+            # Update RND network
             mask_prob = getattr(self.rnd_cfg, 'rnd_mask_prob', 0.25)
             if current_timestep > self.rnd_cfg.learning_starts:
-                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-                
-                obs_np = obs_tensor.cpu().numpy()
-                self.obs_rms.update(obs_np)
-                obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
-                obs_std = torch.sqrt(torch.from_numpy(self.obs_rms.var).float().to(self.device) + 1e-8)
-                norm_obs = (obs_tensor - obs_mean) / obs_std
-                
-                pred, target = self.rnd(norm_obs)
-                mask = torch.rand_like(pred[:, 0]) < mask_prob
-                if mask.sum() > 0:
-                    forward_loss = F.mse_loss(pred[mask], target.detach()[mask])
+                batch_obs = self.replay_buffer.sample(self.batch_size)["obs"]
+                obs_tensor = self.obs_to_float_tensor(batch_obs)
+                norm_obs = self.normalize_obs_with_rms(obs_tensor)
+
+                pred, tgt = self.rnd(norm_obs)
+
+                mask = torch.rand(self.batch_size, device=self.device) < mask_prob
+                if mask.any():
+                    forward_loss = F.mse_loss(pred[mask], tgt.detach()[mask])
                     self.rnd_optimizer.zero_grad()
                     forward_loss.backward()
                     self.rnd_optimizer.step()
 
+            # Update DQN
             if current_timestep > self.rnd_cfg.learning_starts and self.replay_buffer.get_stored_size() >= self.batch_size:
                 batch = self.replay_buffer.sample(self.batch_size)
                 self.update_dqn(batch)
 
+            # Logging
             if current_timestep % 1000 == 0 and current_timestep > 0:
                 wandb.log({
                     "a/ext_reward": ext_reward,
@@ -408,14 +464,18 @@ class DQN_RNDAgent:
                 avg_int_rewards.clear()
                 avg_ext_rewards.clear()
 
+            # Update observation RMS and move to next step
+            self.update_obs_rms(next_obs)
             obs = next_obs
             episode_return += total_reward
             episode_step += 1
             current_timestep += 1
 
+            # Update target network
             if current_timestep % self.target_update_freq == 0:
                 self.target_q_net.load_state_dict(self.q_net.state_dict())
 
+            # Handle episode end
             if done or episode_step >= max_episode_steps:
                 stats.episode_rewards.append(episode_return)
                 stats.episode_lengths.append(episode_step)
@@ -435,14 +495,17 @@ class DQN_RNDAgent:
                 if epsilon > self.rnd_cfg.epsilon_end:
                     epsilon *= self.rnd_cfg.epsilon_decay
 
+                # Reset environment
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
+                self.update_obs_rms(obs)
                 ry, rx = self._agent_rc()
                 self.visit_counts[ry, rx] += 1
                 episode_return = 0
                 episode_step = 0
                 episode_num += 1
 
+            # Periodic evaluation and plotting
             if current_timestep % 10000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_rnd")
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="eval_rnd")
@@ -451,16 +514,13 @@ class DQN_RNDAgent:
                 self.plot_intrinsic_vs_true_bonus_heatmap_minigrid(current_timestep)
 
     def update_dqn(self, batch):
-        # cpprb returns numpy arrays with shapes:
-        # obs: (B, C, H, W) uint8, next_obs: same
-        # act/ext_rew/int_rew/done: (B, 1)
-        obs      = torch.tensor(batch["obs"],      dtype=torch.float32, device=self.device) / 255.0
-        next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
+        obs = self.obs_to_float_tensor(batch["obs"])
+        next_obs = self.obs_to_float_tensor(batch["next_obs"])
 
-        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
-        ext_rew  = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(self.device)
-        int_rew  = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(self.device)
-        done     = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
+        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
+        ext_rew = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(self.device)
+        int_rew = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(self.device)
+        done = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
 
         total_rew = self.extrinsic_coef * ext_rew + self.intrinsic_coef * int_rew
 
@@ -488,28 +548,19 @@ class DQN_RNDAgent:
 from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
 
 
-
 def main():
     wandb.init(project="dqn", name="rnd")
     ENV_NAME = "Fixed-DoorKey-6x6-v0"  
 
-    # env = gym.make(ENV_NAME, render_mode="rgb_array")
-    # env = FullyObsWrapper(env)
-    # env = ImgObsWrapper(env)
-
-    # eval_env = gym.make(ENV_NAME, render_mode="rgb_array")
-    # eval_env = FullyObsWrapper(eval_env)
-    # eval_env = ImgObsWrapper(eval_env)
-
     env = gym.make(
-        "Fixed-DoorKey-v0",           # generic registration
-        size=16,
+        "Fixed-DoorKey-v0",           
+        size=6,  
         disable_env_checker=True,
         render_mode="rgb_array",
-        key_pos=(1, 14),              # bottom-left interior
-        door_pos=(8, 8),              # middle of vertical wall
-        goal_pos=(14, 14),            # bottom-right interior
-        agent_start_pos=(1, 1),       # top-left interior
+        key_pos=(1, 4),              
+        door_pos=(3, 3),             
+        goal_pos=(4, 4),            
+        agent_start_pos=(1, 1),       
     )
     env = customised_doorkey.NoDropWrapper(env)
     env = FullyObsWrapper(env)
@@ -517,14 +568,14 @@ def main():
     env = ImgObsWrapper(env)
 
     eval_env = gym.make(
-        "Fixed-DoorKey-v0",           # generic registration
-        size=16,
+        "Fixed-DoorKey-v0",           
+        size=6,  
         disable_env_checker=True,
         render_mode="rgb_array",
-        key_pos=(1, 14),              # bottom-left interior
-        door_pos=(8, 8),              # middle of vertical wall
-        goal_pos=(14, 14),            # bottom-right interior
-        agent_start_pos=(1, 1),       # top-left interior
+        key_pos=(1, 4),              
+        door_pos=(3, 3),             
+        goal_pos=(4, 4),            
+        agent_start_pos=(1, 1),       
     )
     eval_env = customised_doorkey.NoDropWrapper(eval_env)
     eval_env = FullyObsWrapper(eval_env)
@@ -536,7 +587,7 @@ def main():
 
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 128,
-        "lr": 1e-5,
+        "lr": 1e-4,
         "gamma": 0.99,
         "batch_size": 128,
         "replay_buffer_size": 1_000_000,
@@ -547,11 +598,11 @@ def main():
         "intrinsic_coef": 1.0,
         "extrinsic_coef": 2.0,
         "lr": 1e-4,
-        "learning_starts": 10000,
+        "learning_starts": 1000,
         "epsilon_start": 1.0,
         "epsilon_end": 0.01,
         "epsilon_decay": 0.9998,
-        "rnd_mask_prob": 0.25
+        "rnd_mask_prob": 1.0
     })
 
     agent = DQN_RNDAgent(
@@ -568,7 +619,6 @@ def main():
     print(f"Training finished in {(end - start) / 60:.2f} minutes.")
 
     agent.print_visit_counts()
-    # agent.plot_intrinsic_vs_true_bonus_heatmap_minigrid()
 
 if __name__ == "__main__":
     main()

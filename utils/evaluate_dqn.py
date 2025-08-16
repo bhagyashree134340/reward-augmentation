@@ -75,7 +75,8 @@ def run_episode_gif(env, model, device, filename):
     obs = obs.transpose(2, 0, 1)  # HWC -> CHW
     done = False
     while not done:
-        frame = env.render()
+        # frame = env.render()
+        frame = env.unwrapped.render(highlight=False)  # each time you render
         frames.append(frame)
 
         obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0) / 255.0
@@ -86,10 +87,10 @@ def run_episode_gif(env, model, device, filename):
         obs = obs_next.transpose(2, 0, 1)
         done = terminated or truncated
 
-    frame = env.render()
+    frame = env.unwrapped.render(highlight=False)
     frames.append(frame)
 
-    imageio.mimsave(filename, frames, duration=0.08)  # ~12.5 FPS
+    imageio.mimsave(filename, frames, duration=0.08)  
 
 def main():
     print(f"Loading checkpoint from: {CHECKPOINT_PATH}")

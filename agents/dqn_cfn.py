@@ -107,7 +107,6 @@ class DQN_CFNAgent:
         
         obs = np.array(obs, dtype=np.uint8)
         
-        # Convert from (H, W, C) to (C, H, W)
         if len(obs.shape) == 3:
             obs = np.transpose(obs, (2, 0, 1))
         else:
@@ -118,7 +117,6 @@ class DQN_CFNAgent:
     def act(self, obs, epsilon):
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
-        # Normalize observations consistently with training
         obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
@@ -137,7 +135,7 @@ class DQN_CFNAgent:
 
         epsilon = self.cfn_cfg.epsilon_start
 
-        learning_starts = max(10000, self.batch_size * 4)
+        learning_starts = max(5000, self.batch_size * 4)
 
         while current_timestep < total_timesteps:
            
@@ -155,7 +153,7 @@ class DQN_CFNAgent:
                     "ext_reward": reward
                 }, step=current_timestep)
 
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)  
+            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device) / 255.0
 
             with torch.no_grad():
                 intrinsic_reward = compute_intrinsic_reward(
@@ -163,7 +161,7 @@ class DQN_CFNAgent:
                     self.cfn.compute_squared_output_norm(obs_tensor)
                 )
                 
-            intrinsic_reward_scaled = intrinsic_reward.item() * 10.0
+            intrinsic_reward_scaled = intrinsic_reward.item()
             total_reward = reward + intrinsic_reward_scaled
             # avg_rewards.append(total_reward)
 
@@ -204,7 +202,7 @@ class DQN_CFNAgent:
                 self.update(batch, current_timestep)
                 self.update_count += 1
 
-            if self.cfn_buffer.size >= self.cfn_cfg.cfn_batch_size:
+            if self.cfn_buffer.get_stored_size() >= self.cfn_cfg.cfn_batch_size:
                 
                 obs_batch_bc, coin_flip_batch_bc, indices = self.cfn_buffer.sample_with_indices(self.cfn_cfg.cfn_batch_size)
                 self.update_cfn(obs_batch_bc, coin_flip_batch_bc, current_timestep)
@@ -250,15 +248,15 @@ class DQN_CFNAgent:
             
             if current_timestep % 10000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_cfn")
-                evaluate_dqn(self, self.env, current_timestep, save_dir="checkpoints_cfn")
+                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn")
         
 
     def update(self, batch, current_timestep):
-        obs      = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
+        obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
         next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
-        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
-        rew      = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)
-        done     = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
+        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
+        rew = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)
+        done = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
 
         q_vals = self.q_net(obs)
         q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)
@@ -302,7 +300,6 @@ class DQN_CFNAgent:
 
         self.cfn_optimizer.zero_grad()
         cfn_loss.backward()
-        
         self.cfn_optimizer.step()
         
         if self.update_count % 1000 == 0:
@@ -312,44 +309,52 @@ class DQN_CFNAgent:
 
 
 def main():
-    ENV_NAME = "Fixed-DoorKey-6x6-v0"  
+    # ENV_NAME = "Fixed-DoorKey-6x6-v0"  
     
     wandb.init(project="dqn", name="cfn-improved")  
 
     max_episode_steps = 250
 
+    ENV_NAME = "Fixed-DoorKey-v0"
+
     env = gym.make(
-    "Fixed-DoorKey-6x6-v0",
-    disable_env_checker=True,
-    render_mode="human",
-    key_pos=(1, 4),
-    door_pos=(3, 3),
-    agent_start_pos=(1, 1),   # optional but avoids assertions
+        ENV_NAME,
+        size=6,
+        disable_env_checker=True,
+        render_mode="rgb_array",
+        key_pos=(1, 4),
+        door_pos=(3, 3),
+        goal_pos=(4, 4),
+        agent_start_pos=(1, 1),
     )
+    env = customised_doorkey.NoDropWrapper(env)
     env = FullyObsWrapper(env)
-    env = RGBImgObsWrapper(env, tile_size=8)
+    env = RGBImgObsWrapper(env, tile_size=4)  
     env = ImgObsWrapper(env)
 
     eval_env = gym.make(
-    "Fixed-DoorKey-6x6-v0",
-    disable_env_checker=True,
-    render_mode="rgb_array",
-    key_pos=(1, 4),
-    door_pos=(3, 3),
-    agent_start_pos=(1, 1),   # optional but avoids assertions
+        ENV_NAME,
+        size=6,
+        disable_env_checker=True,
+        render_mode="rgb_array",
+        key_pos=(1, 4),
+        door_pos=(3, 3),
+        goal_pos=(4, 4),
+        agent_start_pos=(1, 1),
     )
+    eval_env = customised_doorkey.NoDropWrapper(eval_env)
     eval_env = FullyObsWrapper(eval_env)
-    eval_env = RGBImgObsWrapper(eval_env, tile_size=8)
+    eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
     eval_env = ImgObsWrapper(eval_env)
-    
 
-    total_timesteps = 1000_000
+    max_episode_steps = 250
+    total_timesteps   = 500_000
 
     
     hidden_size = 256  
-    lr = 1e-5  
+    lr = 3e-4
     gamma = 0.99
-    batch_size = 128  
+    batch_size = 256  
     replay_buffer_size = 1000_000  
     target_update_freq = 2000  
 
@@ -361,7 +366,7 @@ def main():
     learning_starts = 5000  
     epsilon_start = 1.0
     epsilon_end = 0.01  
-    epsilon_decay = 0.9998
+    epsilon_decay = 0.99995
     use_cfn_prior = True
     use_cfn_priority = True
 

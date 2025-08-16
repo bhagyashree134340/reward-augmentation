@@ -14,57 +14,49 @@ class CoinFlipNetworkCNN(nn.Module):
     def __init__(self, obs_shape, coin_dim, device=None):
         super().__init__()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        c, h, w = obs_shape  
+        c, h, w = obs_shape  # (3, 6, 6)
 
+        # Compact CNN Encoder
         self.net_encoder = nn.Sequential(
-            layer_init(nn.Conv2d(in_channels=c, out_channels=32, kernel_size=3, stride=1, padding=1)),  
+            layer_init(nn.Conv2d(c, 16, kernel_size=3, stride=1, padding=1)),  # (6x6) → (6x6)
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)),
+            layer_init(nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)),  # (6x6)
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((2, 2)),  
-            nn.Flatten()
+            nn.AdaptiveAvgPool2d((2, 2)),  # (6x6) → (2x2)
+            nn.Flatten()  # 32×2×2 = 128
         )
-        
+
         self.prior_encoder = nn.Sequential(
-            layer_init(nn.Conv2d(in_channels=c, out_channels=32, kernel_size=3, stride=1, padding=1)),  
+            layer_init(nn.Conv2d(c, 16, kernel_size=3, stride=1, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)),
+            layer_init(nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((2, 2)),  
+            nn.AdaptiveAvgPool2d((2, 2)),
             nn.Flatten()
         )
 
-        with torch.no_grad():
-            dummy = torch.zeros(1, c, h, w)
-            feature_output = self.net_encoder(dummy).shape[1]
+        self.feature_dim = 32 * 2 * 2  # = 128
 
         self.net_head = nn.Sequential(
-            layer_init(nn.Linear(feature_output, 512)),
+            layer_init(nn.Linear(self.feature_dim, 256)),
             nn.ReLU(),
-            layer_init(nn.Linear(512, 512)),
-            nn.ReLU(),
-            layer_init(nn.Linear(512, coin_dim)),
+            layer_init(nn.Linear(256, coin_dim)),
         )
 
         self.prior_head = nn.Sequential(
-            layer_init(nn.Linear(feature_output, 512)),
+            layer_init(nn.Linear(self.feature_dim, 256)),
             nn.ReLU(),
-            layer_init(nn.Linear(512, 512)),
-            nn.ReLU(),
-            layer_init(nn.Linear(512, coin_dim)),
+            layer_init(nn.Linear(256, coin_dim)),
         )
-        
+
+        # Freeze prior
         for param in self.prior_encoder.parameters():
             param.requires_grad = False
         for param in self.prior_head.parameters():
             param.requires_grad = False
 
         self.register_buffer("prior_mean", torch.zeros(coin_dim))
-        self.register_buffer("prior_var", torch.ones(coin_dim) * 0.01)  
+        self.register_buffer("prior_var", torch.ones(coin_dim) * 0.01)
         self.register_buffer("prior_count", torch.tensor(1.0))
 
         self.coin_flip_dim = coin_dim
@@ -72,10 +64,8 @@ class CoinFlipNetworkCNN(nn.Module):
 
     def forward(self, obs, update_prior_stats=False):
         obs = obs.to(self.device)
-        if obs.dtype == torch.uint8:
+        if obs.dtype == torch.uint8 or torch.amax(obs) > 1.0:
             obs = obs.float() / 255.0
-        # elif obs.max() > 1.0:
-        #     obs = obs / 255.0
 
         net_features = self.net_encoder(obs)
         net_output = self.net_head(net_features)
@@ -83,7 +73,7 @@ class CoinFlipNetworkCNN(nn.Module):
         with torch.no_grad():
             prior_features = self.prior_encoder(obs)
             prior_out = self.prior_head(prior_features)
-            
+
             if update_prior_stats:
                 self.update_prior_stats(prior_out)
 
@@ -96,15 +86,17 @@ class CoinFlipNetworkCNN(nn.Module):
     def update_prior_stats(self, prior_out):
         with torch.no_grad():
             if prior_out.dim() > 1:
-                prior_out = prior_out.mean(dim=0)  
-            
+                batch_mean = prior_out.mean(dim=0)
+            else:
+                batch_mean = prior_out
+
             count = self.prior_count.item()
             new_count = count + 1
 
-            delta = prior_out - self.prior_mean
+            delta = batch_mean - self.prior_mean
             self.prior_mean.add_(delta / new_count)
 
-            delta2 = prior_out - self.prior_mean
+            delta2 = batch_mean - self.prior_mean
             self.prior_var.add_(delta * delta2 * count / new_count)
             self.prior_count.fill_(new_count)
 

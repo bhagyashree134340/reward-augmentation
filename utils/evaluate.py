@@ -25,9 +25,15 @@ import torch
 import matplotlib.pyplot as plt
 import os
 
+import os
+import numpy as np
+import torch
+import imageio
+from pathlib import Path
+
 def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to_wandb=True):
     """
-    Evaluate DQN agent and log results.
+    Evaluate DQN agent, save GIFs and log results to WandB.
 
     Args:
         agent: DQN agent (must have q_net and process_obs)
@@ -35,7 +41,7 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to
         step: Current training step
         save_dir: Directory to save plots and data
         num_episodes: Number of episodes to evaluate
-        log_to_wandb: If True, log returns to wandb per episode
+        log_to_wandb: If True, log returns and GIFs to WandB
     """
     os.makedirs(save_dir, exist_ok=True)
     returns = []
@@ -46,9 +52,11 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to
         done = False
         total_return = 0
         ep_len = 0
+        frames = [eval_env.render()]  # collect initial frame
 
         while not done:
             obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(agent.device)
+            obs_tensor = obs_tensor / 255.0  
             with torch.no_grad():
                 q_values = agent.q_net(obs_tensor)
                 action = torch.argmax(q_values, dim=1).item()
@@ -59,14 +67,23 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to
             total_return += reward
             ep_len += 1
 
+            frame = eval_env.render()
+            frames.append(frame)
+
+        # Save episode return
         returns.append(total_return)
+
+        # Save and log GIF
+        gif_path = os.path.join(save_dir, f"eval_step{step}_ep{ep}.gif")
+        imageio.mimsave(gif_path, frames, fps=6)
 
         if log_to_wandb:
             import wandb
             wandb.log({
-                "eval/episode_return": total_return,
-                "eval/episode_length": ep_len,
-                "eval/episode_idx": ep,
+                f"eval/episode_return": total_return,
+                f"eval/episode_length": ep_len,
+                f"eval/gif_episode_{ep}": wandb.Video(gif_path, fps=6, format="gif"),
+                f"eval/episode_idx": ep,
             }, step=step)
 
     returns = np.array(returns)
