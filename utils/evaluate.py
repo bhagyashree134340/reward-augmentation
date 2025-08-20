@@ -31,71 +31,71 @@ import torch
 import imageio
 from pathlib import Path
 
-def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to_wandb=True):
-    """
-    Evaluate DQN agent, save GIFs and log results to WandB.
 
-    Args:
-        agent: DQN agent (must have q_net and process_obs)
-        eval_env: Evaluation environment
-        step: Current training step
-        save_dir: Directory to save plots and data
-        num_episodes: Number of episodes to evaluate
-        log_to_wandb: If True, log returns and GIFs to WandB
-    """
+def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to_wandb=True, fps=6):
     os.makedirs(save_dir, exist_ok=True)
-    returns = []
+    returns, lengths = [], []
 
-    for ep in range(num_episodes):
-        obs_raw, _ = eval_env.reset()
-        obs = agent.process_obs(obs_raw)
-        done = False
-        total_return = 0
-        ep_len = 0
-        frames = [eval_env.render()]  # collect initial frame
+    # switch to eval mode; restore afterwards
+    was_training = agent.q_net.training
+    agent.q_net.eval()
 
-        while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(agent.device)
-            obs_tensor = obs_tensor / 255.0  
-            with torch.no_grad():
-                q_values = agent.q_net(obs_tensor)
-                action = torch.argmax(q_values, dim=1).item()
+    try:
+        for ep in range(num_episodes):
+            obs_raw, _ = eval_env.reset()
+            obs = agent.process_obs(obs_raw)
+            done = False
+            total_return = 0.0
+            ep_len = 0
 
-            next_obs_raw, reward, terminated, truncated, _ = eval_env.step(action)
-            done = terminated or truncated
-            obs = agent.process_obs(next_obs_raw)
-            total_return += reward
-            ep_len += 1
+            frames = []
+            # only record the first episode to save time/space
+            record_gif = (ep == 0)
 
-            frame = eval_env.render()
-            frames.append(frame)
+            if record_gif:
+                frames.append(eval_env.render())
 
-        # Save episode return
-        returns.append(total_return)
+            # greedy evaluation (epsilon = 0)
+            while not done:
+                action = agent.act(obs, epsilon=0.0)
 
-        # Save and log GIF
-        gif_path = os.path.join(save_dir, f"eval_step{step}_ep{ep}.gif")
-        imageio.mimsave(gif_path, frames, fps=6)
+                next_obs_raw, reward, terminated, truncated, _ = eval_env.step(action)
+                done = bool(terminated or truncated)
+                obs = agent.process_obs(next_obs_raw)
+
+                total_return += float(reward)
+                ep_len += 1
+
+                if record_gif:
+                    frames.append(eval_env.render())
+
+            returns.append(total_return)
+            lengths.append(ep_len)
+
+            if record_gif:
+                gif_path = os.path.join(save_dir, f"eval_step{step}_ep{ep}.gif")
+                imageio.mimsave(gif_path, frames, fps=fps)
+                if log_to_wandb:
+                    import wandb
+                    wandb.log({f"eval/gif_episode_{ep}": wandb.Video(gif_path, fps=fps, format="gif")}, step=step)
+
+        returns = np.array(returns, dtype=np.float32)
+        lengths = np.array(lengths, dtype=np.int32)
+        np.savez(os.path.join(save_dir, f"eval_step_{step}.npz"), returns=returns, lengths=lengths)
 
         if log_to_wandb:
             import wandb
             wandb.log({
-                f"eval/episode_return": total_return,
-                f"eval/episode_length": ep_len,
-                f"eval/gif_episode_{ep}": wandb.Video(gif_path, fps=6, format="gif"),
-                f"eval/episode_idx": ep,
+                "eval/mean_return": float(returns.mean()),
+                "eval/std_return":  float(returns.std()),
+                "eval/mean_length": float(lengths.mean()),
             }, step=step)
 
-    returns = np.array(returns)
-    np.savez(os.path.join(save_dir, f"eval_step_{step}.npz"), returns=returns)
+        print(f"[EVAL] step {step} | avg return: {returns.mean():.3f} | avg len: {lengths.mean():.1f}")
+    finally:
+        if was_training:
+            agent.q_net.train()
 
-    if log_to_wandb:
-        wandb.log({
-            "eval/mean_return": returns.mean(),
-            "eval/std_return": returns.std()
-        }, step=step)
-
-    print(f"[EVAL] Step {step} | Avg return: {returns.mean():.2f}")
 
 
 def evaluate(actor, env, current_timestep, max_steps, path=None, device=None):

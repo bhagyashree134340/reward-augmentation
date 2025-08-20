@@ -25,7 +25,7 @@ start=`date +%s`
 echo "Running training script..."
 cd /work/dlclarge2/raneb-project/reward-augmentation
 export PYTHONPATH=$PWD
-python agents/dqn_cfn.py
+python agents/dqn_cfn_.py
 
 end=`date +%s`
 runtime=$((end-start))

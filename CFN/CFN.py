@@ -22,7 +22,7 @@ class CoinFlipNetworkCNN(nn.Module):
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)),  # (6x6)
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((2, 2)),  # (6x6) → (2x2)
+            # nn.AdaptiveAvgPool2d((2, 2)),  # (6x6) → (2x2)
             nn.Flatten()  # 32×2×2 = 128
         )
 
@@ -31,7 +31,7 @@ class CoinFlipNetworkCNN(nn.Module):
             nn.ReLU(),
             layer_init(nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((2, 2)),
+            # nn.AdaptiveAvgPool2d((2, 2)),
             nn.Flatten()
         )
 

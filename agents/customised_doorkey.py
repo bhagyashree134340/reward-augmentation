@@ -11,6 +11,43 @@ from gymnasium import spaces
 from gymnasium.core import Wrapper
 from minigrid.core.actions import Actions
 
+# drop this somewhere you import wrappers
+from minigrid.core.world_object import Wall, Goal
+import gymnasium as gym
+
+class PatchGridWrapper(gym.Wrapper):
+    """put walls and goal at specific interior cells each reset"""
+    def __init__(self, env, wall_cells, goal_cell):
+        super().__init__(env)
+        self.wall_cells = wall_cells          # list of (x,y) in 0..(size-3)
+        self.goal_cell  = goal_cell           # (x,y) in interior coords
+
+    def _apply_patch(self):
+        base = self.env.unwrapped
+        g = base.grid
+
+        # clear any existing goal
+        # (safe even if there wasn't one yet)
+        if hasattr(base, "goal_pos"):
+            gx_old, gy_old = base.goal_pos
+            g.set(gx_old, gy_old, None)
+
+        # place walls
+        for (xi, yi) in self.wall_cells:
+            g.set(xi + 1, yi + 1, Wall())
+
+        # place goal
+        gx, gy = self.goal_cell
+        g.set(gx + 1, gy + 1, Goal())
+        base.goal_pos = (gx + 1, gy + 1)
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self._apply_patch()
+        # re-render obs if you're using fully-obs rgb wrappers (optional)
+        return obs, info
+
+
 class NoDropWrapper(Wrapper):
     """
     Remove the Drop action from the action space.

@@ -101,6 +101,10 @@ class DQN_CFNAgent:
         self.step_count = 0
         self.update_count = 0
 
+        h = self.env.unwrapped.grid.height
+        w = self.env.unwrapped.grid.width
+        self.visit_counts = np.zeros((h - 2, w - 2), dtype=np.int32)
+
     def process_obs(self, obs):
         if isinstance(obs, dict) and 'image' in obs:
             obs = obs['image']
@@ -113,6 +117,10 @@ class DQN_CFNAgent:
             raise ValueError(f"Unexpected observation shape: {obs.shape}")
             
         return obs
+
+    def increment_visit_counts(self):
+        x, y = map(int, self.env.unwrapped.agent_pos)
+        self.visit_counts[(y - 1), (x - 1)] += 1
 
     def act(self, obs, epsilon):
         if np.random.rand() < epsilon:
@@ -129,6 +137,7 @@ class DQN_CFNAgent:
         episode_num = 0
         obs_raw, _ = self.env.reset()
         obs = self.process_obs(obs_raw)
+        self.increment_visit_counts()
         avg_rewards = []
 
         stats = EpisodeStats([], [], [])
@@ -145,6 +154,7 @@ class DQN_CFNAgent:
 
             next_obs_raw, reward, terminated, truncated, info = self.env.step(action)
             next_obs = self.process_obs(next_obs_raw)
+            self.increment_visit_counts()
 
             done = truncated or terminated
 
@@ -153,15 +163,24 @@ class DQN_CFNAgent:
                     "ext_reward": reward
                 }, step=current_timestep)
 
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device) / 255.0
+            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+
+            self.cfn(obs_tensor, update_prior_stats=True)
 
             with torch.no_grad():
                 intrinsic_reward = compute_intrinsic_reward(
                     self.coin_flip_dim,
                     self.cfn.compute_squared_output_norm(obs_tensor)
                 )
-                
+
             intrinsic_reward_scaled = intrinsic_reward.item()
+
+            agent_x, agent_y = map(int, self.env.unwrapped.agent_pos)
+            wandb.log(
+                {f"cfn/int_reward({agent_y - 1},{agent_x - 1})": intrinsic_reward_scaled},
+                step=current_timestep
+            )
+            
             total_reward = reward + intrinsic_reward_scaled
             # avg_rewards.append(total_reward)
 
@@ -176,13 +195,12 @@ class DQN_CFNAgent:
                     "rewards/int_reward": intrinsic_reward_scaled,
                     "rewards/total_reward": total_reward,
                     "cfn/output_norm": output_norm.cpu().item(),
-                    "cfn/pseudocount": pseudocount_estimate.cpu().item(),
+                    f"cfn/pseudocount({agent_y - 1},{agent_x - 1})": pseudocount_estimate.cpu().item(),
                 }, step=current_timestep)
 
                 
                 # log_intrinsic_reward_per_feature_from_obs(self, obs_tensor, step=current_timestep)
 
-            self.cfn(obs_tensor, update_prior_stats=True)
 
             # self.replay_buffer.append((obs, action, total_reward, next_obs, done))
             self.replay_buffer.add(
@@ -242,13 +260,16 @@ class DQN_CFNAgent:
 
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
+                self.increment_visit_counts()
                 episode_return = 0
                 episode_step = 0
                 episode_num += 1
             
             if current_timestep % 10000 == 0 and current_timestep > 0:
+                
                 validate_dqn(self, current_timestep, save_dir="checkpoints_cfn")
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn")
+                self.log_doorkey_true_vs_pseudo_counts(self.visit_counts, step=current_timestep)
         
 
     def update(self, batch, current_timestep):
@@ -308,6 +329,84 @@ class DQN_CFNAgent:
             }, step=current_timestep)
 
 
+    def log_doorkey_true_vs_pseudo_counts(agent, visit_counts, step, save_path=None):
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import torch
+        import wandb
+
+        base_env = agent.eval_env.unwrapped
+
+        h, w = visit_counts.shape
+        true_bonus = 1.0 / np.sqrt(visit_counts + 1e-8)
+
+        approx_bonus = np.zeros_like(true_bonus)
+        mask = visit_counts == 0  # Mask for unvisited cells
+
+        for y in range(h):
+            for x in range(w):
+                # if mask[y, x]:
+                #     approx_bonus[y, x] = np.nan
+                #     continue
+
+                base_env.reset()
+                base_env.agent_pos = (x + 1, y + 1)  
+                base_env.agent_dir = np.random.randint(0, 4)  
+                base_env.step(base_env.actions.toggle)  
+
+                obs_raw = base_env.render()  
+                obs = agent.process_obs(obs_raw)
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0)
+
+                if obs_tensor.max() > 1.0:
+                    obs_tensor = obs_tensor / 255.0
+
+                with torch.no_grad():
+                    norm2 = agent.cfn.compute_squared_output_norm(obs_tensor).item()
+                    approx_bonus[y, x] = np.sqrt(norm2 / agent.coin_flip_dim)
+
+        true_bonus_masked = np.ma.array(true_bonus, mask=mask)
+        approx_bonus_masked = np.ma.array(approx_bonus, mask=mask)
+
+        fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+        axs = axs.flatten()
+
+        # Plot True Bonus + annotate with visit counts
+        im1 = axs[0].imshow(true_bonus_masked, cmap="Greens")
+        axs[0].set_title("True Bonus (1/sqrt(visit_counts))")
+        for i in range(h):
+            for j in range(w):
+                if not mask[i, j]:
+                    count = visit_counts[i, j]
+                    axs[0].text(j, i, f"{int(count)}", ha='center', va='center',
+                                color='white' if true_bonus[i, j] < true_bonus.max() / 2 else 'black')
+        plt.colorbar(im1, ax=axs[0])
+
+
+        clipped_intrinsic_bonus = approx_bonus.copy()
+        vmin_clip = np.nanpercentile(clipped_intrinsic_bonus, 1)
+        vmax_clip = np.nanpercentile(clipped_intrinsic_bonus, 99)
+
+        clipped_intrinsic_bonus = np.clip(clipped_intrinsic_bonus, vmin_clip, vmax_clip)
+        rnd_vmin, rnd_vmax = vmin_clip, vmax_clip
+
+        im2 = axs[1].imshow(clipped_intrinsic_bonus, cmap="viridis", vmin=rnd_vmin, vmax=rnd_vmax)
+        axs[1].set_title("Intrinsic Bonus (CFN)")
+        plt.colorbar(im2, ax=axs[1])
+
+        for ax in axs:
+            ax.set_xticks(range(w))
+            ax.set_yticks(range(h))
+            ax.set_xticklabels(range(w))
+            ax.set_yticklabels(range(h))
+
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path)
+        wandb.log({f"cfn/true_vs_intrinsic_bonus_heatmap": wandb.Image(fig)}, step=step)
+        plt.close()
+
 def main():
     # ENV_NAME = "Fixed-DoorKey-6x6-v0"  
     
@@ -318,14 +417,16 @@ def main():
     ENV_NAME = "Fixed-DoorKey-v0"
 
     env = gym.make(
-        ENV_NAME,
-        size=6,
+        "Fixed-DoorKey-v0",
+        size=10,
+        key_pos=(1, 8),           # bottom-left room
+        door_pos=(5, 5),          # middle vertical wall
+        goal_pos=(8, 5),          # right room
+        agent_start_pos=(1, 1),   # top-left
+        agent_start_dir=0,
         disable_env_checker=True,
-        render_mode="rgb_array",
-        key_pos=(1, 4),
-        door_pos=(3, 3),
-        goal_pos=(4, 4),
-        agent_start_pos=(1, 1),
+        max_episode_steps=400,
+        render_mode="rgb_array"  # Use RGB rendering for evaluation
     )
     env = customised_doorkey.NoDropWrapper(env)
     env = FullyObsWrapper(env)
@@ -333,22 +434,24 @@ def main():
     env = ImgObsWrapper(env)
 
     eval_env = gym.make(
-        ENV_NAME,
-        size=6,
+        "Fixed-DoorKey-v0",
+        size=10,
+        key_pos=(1, 8),           # bottom-left room
+        door_pos=(5, 5),          # middle vertical wall
+        goal_pos=(8, 5),          # right room
+        agent_start_pos=(1, 1),   # top-left
+        agent_start_dir=0,
         disable_env_checker=True,
-        render_mode="rgb_array",
-        key_pos=(1, 4),
-        door_pos=(3, 3),
-        goal_pos=(4, 4),
-        agent_start_pos=(1, 1),
+        max_episode_steps=400,
+        render_mode="rgb_array"  # Use RGB rendering for evaluation
     )
     eval_env = customised_doorkey.NoDropWrapper(eval_env)
     eval_env = FullyObsWrapper(eval_env)
     eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
     eval_env = ImgObsWrapper(eval_env)
 
-    max_episode_steps = 250
-    total_timesteps   = 500_000
+    max_episode_steps = 400
+    total_timesteps   = 1000_000
 
     
     hidden_size = 256  
