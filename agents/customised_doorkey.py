@@ -15,37 +15,46 @@ from minigrid.core.actions import Actions
 from minigrid.core.world_object import Wall, Goal
 import gymnasium as gym
 
-class PatchGridWrapper(gym.Wrapper):
-    """put walls and goal at specific interior cells each reset"""
-    def __init__(self, env, wall_cells, goal_cell):
+# customised_doorkey.py
+from typing import Optional, Iterable, Tuple
+from gymnasium.core import Wrapper
+from minigrid.core.world_object import Wall, Goal
+
+class PatchGridWrapper(Wrapper):
+    def __init__(
+        self,
+        env,
+        wall_cells: Optional[Iterable[Tuple[int, int]]] = None,
+        goal_cell: Optional[Tuple[int, int]] = None,
+        use_env_coords: bool = False,   # False = interior 0-based, True = env grid (with walls)
+    ):
         super().__init__(env)
-        self.wall_cells = wall_cells          # list of (x,y) in 0..(size-3)
-        self.goal_cell  = goal_cell           # (x,y) in interior coords
-
-    def _apply_patch(self):
-        base = self.env.unwrapped
-        g = base.grid
-
-        # clear any existing goal
-        # (safe even if there wasn't one yet)
-        if hasattr(base, "goal_pos"):
-            gx_old, gy_old = base.goal_pos
-            g.set(gx_old, gy_old, None)
-
-        # place walls
-        for (xi, yi) in self.wall_cells:
-            g.set(xi + 1, yi + 1, Wall())
-
-        # place goal
-        gx, gy = self.goal_cell
-        g.set(gx + 1, gy + 1, Goal())
-        base.goal_pos = (gx + 1, gy + 1)
+        self.wall_cells = list(wall_cells or [])
+        self.goal_cell = goal_cell
+        self.use_env_coords = use_env_coords
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self._apply_patch()
-        # re-render obs if you're using fully-obs rgb wrappers (optional)
         return obs, info
+
+    def _to_env(self, x, y):
+        return (x, y) if self.use_env_coords else (x + 1, y + 1)
+
+    def _apply_patch(self):
+        grid = self.unwrapped.grid
+
+        # Patch walls
+        for x, y in self.wall_cells:
+            ex, ey = self._to_env(x, y)
+            grid.set(ex, ey, Wall())
+
+        # Patch goal only if provided
+        if self.goal_cell is not None:
+            gx, gy = self.goal_cell
+            ex, ey = self._to_env(gx, gy)
+            grid.set(ex, ey, Goal())
+
 
 
 class NoDropWrapper(Wrapper):

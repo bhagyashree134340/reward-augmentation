@@ -15,17 +15,19 @@ class DDQN(nn.Module):
         if is_cnn:
             c, h, w = obs_shape
             
+            # Match RND architecture - no aggressive pooling
             self.conv_layers = nn.Sequential(
                 layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1)),  
                 nn.ReLU(),
                 layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)), 
                 nn.ReLU(),
-                layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)), 
-                nn.ReLU(),
-                nn.AdaptiveAvgPool2d((2, 2)),  
+                nn.Flatten(),  # Remove AdaptiveAvgPool2d for better spatial info
             )
             
-            self.feature_size = 64 * 2 * 2
+            # Calculate feature size properly
+            with torch.no_grad():
+                dummy_input = torch.zeros(1, c, h, w)
+                self.feature_size = self.conv_layers(dummy_input).shape[1]
             
             self.fc_layers = nn.Sequential(
                 layer_init(nn.Linear(self.feature_size, hidden_size)),
@@ -38,11 +40,11 @@ class DDQN(nn.Module):
         else:
             state_size = obs_shape[0] if isinstance(obs_shape, tuple) else obs_shape
             self.fc_layers = nn.Sequential(
-                nn.Linear(state_size, hidden_size),
+                layer_init(nn.Linear(state_size, hidden_size)),
                 nn.ReLU(),
-                nn.Linear(hidden_size, hidden_size),
+                layer_init(nn.Linear(hidden_size, hidden_size)),
                 nn.ReLU(),
-                nn.Linear(hidden_size, action_size)
+                layer_init(nn.Linear(hidden_size, action_size))
             )
         
         self.is_cnn = is_cnn
@@ -55,7 +57,7 @@ class DDQN(nn.Module):
                 x = x / 255.0
                 
             x = self.conv_layers(x)
-            x = x.view(x.size(0), -1)
+            x = x.view(x.size(0), -1)  # This is now redundant since we use Flatten()
             return self.fc_layers(x)
         else:
             return self.fc_layers(x)

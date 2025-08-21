@@ -70,18 +70,23 @@ def _render_probe_obs(agent, base_env, x, y, dir_idx, has_key, door_open):
 
 def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=True):
     """
-    Creates 16 heatmaps (dir x has_key x door_open) of intrinsic bonus over (x,y).
+    16 heatmaps (dir x has_key x door_open) of intrinsic bonus over (x,y).
     Logs a single 4x4 grid image to WandB.
     """
-    base_env = agent.eval_env.unwrapped  # or a separate fixed env instance
+    base_env = agent.eval_env.unwrapped
     dirs = [0, 1, 2, 3]                 # N,E,S,W
     has_keys = [False, True]
     doors_open = [False, True]
 
-    panels = []
-    titles = []
+    # --- ensure deterministic eval for the probe ---
+    try:
+        agent.rnd_predictor.eval()      # or agent.cfn.eval(), depending on your class
+    except Exception:
+        pass
 
-    # Precompute mask (optional) so walls show as NaN
+    panels, titles = [], []
+
+    # Precompute wall mask once (just to hide outer walls in plots)
     wall_mask = np.ones((grid_h, grid_w), dtype=bool)
     if mask_walls:
         for y in range(grid_h):
@@ -96,34 +101,43 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
                     for x in range(grid_w):
                         if mask_walls and not wall_mask[y, x]:
                             continue
+
+                        # Render probe obs exactly like training (but silence debug prints)
                         obs = _render_probe_obs(agent, base_env, x, y, d, hk, do)
-                        # to torch tensor (match your compute function’s expectations)
                         if isinstance(obs, np.ndarray):
                             obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(agent.device)
                         else:
-                            # already torch; ensure batch dim + device
-                            obs_t = obs.unsqueeze(0).to(agent.device)
+                            obs_t = obs.float().unsqueeze(0).to(agent.device)
 
-                        with torch.no_grad():
-                            bonus = agent.compute_intrinsic_bonus(obs_t)  # shape [1] or [1,1]
-                        H[y, x] = float(bonus.squeeze().cpu().item())
+                        with torch.inference_mode():
+                            b = agent._bonus_from_obs_tensor(obs_t)
+                            if isinstance(b, torch.Tensor):
+                                H[y, x] = b.detach().flatten()[0].item()
+                            try:
+                                H[y, x] = float(b)
+                            except Exception:
+                                H[y, x] = float(np.asarray(b).flatten()[0])
 
                 panels.append(H)
                 titles.append(f"dir={d} | key={int(hk)} | door_open={int(do)}")
 
-    # Plot 4x4
-    fig, axes = plt.subplots(4, 4, figsize=(16, 16))
-    vmax = np.nanpercentile([p for P in panels for p in P.ravel() if not np.isnan(p)], 95)
+    # --- plotting (use constrained layout; no tight_layout) ---
+    fig, axes = plt.subplots(4, 4, figsize=(16, 16), constrained_layout=True)
+
+    # robust color scaling across all panels (95th percentile)
+    finite_vals = np.concatenate([P[np.isfinite(P)].ravel() for P in panels])
+    vmax = np.percentile(finite_vals, 95) if finite_vals.size else 1.0
     vmin = 0.0
+
+    last_im = None
     for ax, H, title in zip(axes.ravel(), panels, titles):
-        im = ax.imshow(H, origin="upper", vmin=vmin, vmax=vmax)
+        last_im = ax.imshow(H, origin="upper", vmin=vmin, vmax=vmax)
         ax.set_title(title, fontsize=11)
         ax.set_xticks([]); ax.set_yticks([])
-    # single colorbar for all
-    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.8)
+
+    cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), shrink=0.8)
     cbar.set_label("intrinsic bonus", rotation=90)
     fig.suptitle(f"CFN/RND intrinsic bonus small-multiples @ step {step}", fontsize=14)
-    fig.tight_layout()
 
     wandb.log({"intrinsic/small_multiples": wandb.Image(fig)}, step=step)
     plt.close(fig)

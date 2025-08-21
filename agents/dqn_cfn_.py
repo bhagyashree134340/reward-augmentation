@@ -395,7 +395,7 @@ def main():
         size=10,
         key_pos=(1, 8),
         door_pos=(5, 5),
-        goal_pos=(7, 0),
+        goal_pos=(8, 1),
         agent_start_pos=(1, 1),
         agent_start_dir=0,
         disable_env_checker=True,
@@ -406,7 +406,7 @@ def main():
     env = customised_doorkey.PatchGridWrapper(
         env,
         wall_cells=[(6, 1), (7, 1)],   # the two blue cells (x,y) in interior coords
-        goal_cell=(7, 0),              # the red cell (x,y) in interior coords
+        goal_cell=(7,0),              # the red cell (x,y) in interior coords
     )
     env = FullyObsWrapper(env)
     env = RGBImgObsWrapper(env, tile_size=4)
@@ -417,7 +417,7 @@ def main():
         size=10,
         key_pos=(1, 8),
         door_pos=(5, 5),
-        goal_pos=(7, 0),
+        goal_pos=(8, 1),
         agent_start_pos=(1, 1),
         agent_start_dir=0,
         disable_env_checker=True,
@@ -428,7 +428,7 @@ def main():
     eval_env = customised_doorkey.PatchGridWrapper(
         eval_env,
         wall_cells=[(6, 1), (7, 1)],   
-        goal_cell=(7, 0),              
+        goal_cell=None,              
     )
     eval_env = FullyObsWrapper(eval_env)
     eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
