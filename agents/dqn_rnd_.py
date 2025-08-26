@@ -47,14 +47,15 @@ class RewardForwardFilter:
 
 
 class RNDModel(nn.Module):
-    def __init__(self, obs_shape, hidden_size=128):
+    def __init__(self, obs_shape, hidden_size=256):
         super(RNDModel, self).__init__()
         c, h, w = obs_shape
-        
-        # Simpler encoder for small 10x10 grids
+
         def make_encoder():
             return nn.Sequential(
-                nn.Conv2d(c, 16, kernel_size=3, stride=1, padding=1),
+                self._layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1)),
+                nn.ReLU(),
+                self._layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)),
                 nn.ReLU(),
                 nn.Flatten(),
             )
@@ -62,18 +63,30 @@ class RNDModel(nn.Module):
         self.target_encoder = make_encoder()
         self.predictor_encoder = make_encoder()
         
-        # Calculate feature dimension
         with torch.no_grad():
             dummy_input = torch.zeros(1, *obs_shape)
             feature_dim = self.target_encoder(dummy_input).shape[1]
         
-        # Smaller heads
-        self.target_head = nn.Linear(feature_dim, hidden_size)
-        self.predictor_head = nn.Linear(feature_dim, hidden_size)
+        self.target_head = nn.Sequential(
+            self._layer_init(nn.Linear(feature_dim, hidden_size)),
+            nn.ReLU(),
+            self._layer_init(nn.Linear(hidden_size, hidden_size)),
+        )
+        
+        self.predictor_head = nn.Sequential(
+            self._layer_init(nn.Linear(feature_dim, hidden_size)),
+            nn.ReLU(),
+            self._layer_init(nn.Linear(hidden_size, hidden_size)),
+        )
 
-        # Freeze target network
         for p in list(self.target_encoder.parameters()) + list(self.target_head.parameters()):
             p.requires_grad = False
+
+    def _layer_init(self, layer, std=np.sqrt(2), bias_const=0.0):
+        nn.init.orthogonal_(layer.weight, gain=std)
+        if hasattr(layer, "bias") and layer.bias is not None:
+            nn.init.constant_(layer.bias, bias_const)
+        return layer
 
     def forward(self, obs):
         target_features = self.target_encoder(obs)
@@ -94,7 +107,6 @@ class DQN_RNDAgent:
         self.obs_shape = env.observation_space.shape
         act_dim = env.action_space.n
 
-        # visit counts for simple "true bonus"
         h = self.env.unwrapped.grid.height
         w = self.env.unwrapped.grid.width
         self.visit_counts = np.zeros((h - 2, w - 2), dtype=np.int32)
@@ -106,7 +118,6 @@ class DQN_RNDAgent:
             raise ValueError(f"Unexpected observation shape: {self.obs_shape}")
         print("PyTorch obs shape:", self.obs_shape_torch)
 
-        # q nets
         self.q_net = DDQN(self.obs_shape_torch, act_dim, dqn_cfg.hidden_size, is_cnn=True).to(self.device)
         self.target_q_net = DDQN(self.obs_shape_torch, act_dim, dqn_cfg.hidden_size, is_cnn=True).to(self.device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
@@ -119,7 +130,6 @@ class DQN_RNDAgent:
         self._update_steps = 0
         self._step_count = 0
 
-        # replay
         self.replay_buffer = ReplayBuffer(
             dqn_cfg.replay_buffer_size,
             env_dict={
@@ -132,24 +142,20 @@ class DQN_RNDAgent:
             },
         )
 
-        # rnd config
         self.rnd_cfg = rnd_cfg
         self.intrinsic_coef = rnd_cfg.intrinsic_coef
         self.extrinsic_coef = rnd_cfg.extrinsic_coef
 
-        # rnd nets + opt
         self.rnd = RNDModel(self.obs_shape_torch).to(self.device)
         self.rnd_optimizer = torch.optim.Adam(
             list(self.rnd.predictor_encoder.parameters()) + list(self.rnd.predictor_head.parameters()), 
             lr=rnd_cfg.lr
         )
 
-        # running stats - separate for obs and rewards as per paper
         self.obs_rms = RunningMeanStd(shape=self.obs_shape_torch)
-        self.reward_rms = RunningMeanStd(shape=())  # scalar shape
+        self.reward_rms = RunningMeanStd(shape=())  
         self.reward_filter = RewardForwardFilter(gamma=0.99)
         
-        # episode intrinsic rewards for normalization
         self.episode_intrinsic_rewards = deque(maxlen=100)
 
     def increment_visit_counts(self):
@@ -157,7 +163,6 @@ class DQN_RNDAgent:
         self.visit_counts[(y - 1), (x - 1)] += 1
 
     def process_obs(self, obs):
-        # make chw uint8
         if isinstance(obs, dict) and "image" in obs:
             obs = obs["image"]
         obs = np.array(obs, dtype=np.uint8)
@@ -168,7 +173,6 @@ class DQN_RNDAgent:
         return obs
 
     def obs_to_float_tensor(self, obs):
-        # to float [0,1]
         if isinstance(obs, np.ndarray):
             obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
         else:
@@ -178,7 +182,6 @@ class DQN_RNDAgent:
         return obs_tensor
 
     def act(self, obs, epsilon):
-        # eps-greedy policy
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
         obs_tensor = self.obs_to_float_tensor(obs).unsqueeze(0)
@@ -187,53 +190,36 @@ class DQN_RNDAgent:
         return q_values.argmax().item()
 
     def compute_intrinsic_reward(self, obs_tensor):
-        # Faithful RND: whitening + clipping as per paper
         if len(obs_tensor.shape) == 3:
             obs_tensor = obs_tensor.unsqueeze(0)
             
         obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
         obs_var = torch.from_numpy(self.obs_rms.var).float().to(self.device)
         
-        # Clip variance to avoid division by zero
-        obs_var = torch.clamp(obs_var, min=1e-4)
-        
-        normalized_obs = (obs_tensor - obs_mean) / torch.sqrt(obs_var)
+        normalized_obs = (obs_tensor - obs_mean) / torch.sqrt(obs_var + 1e-8)
         normalized_obs = torch.clamp(normalized_obs, -5.0, 5.0)
         
         with torch.no_grad():
             pred, target = self.rnd(normalized_obs)
-            # MSE between predictor and target
-            intrinsic_reward = F.mse_loss(pred, target, reduction='none').mean(dim=-1)
+            intrinsic_reward = 0.5 * ((pred - target) ** 2).sum().detach()
         
         return intrinsic_reward
 
-    def _fit_obs_rms_warmup(self):
-        # Collect observations for RMS initialization
-        print("Starting observation RMS warmup...")
-        obs_buffer = []
-        
-        for _ in range(500):
+    def _fit_obs_rms_warmup(self, frames=20000, max_ep_len=200):
+        seen = 0
+        while seen < frames:
             obs_raw, _ = self.env.reset()
-            obs = self.process_obs(obs_raw)
-            obs_tensor = self.obs_to_float_tensor(obs)
-            obs_buffer.append(obs_tensor.cpu().numpy())
-            
-            for _ in range(400):  
+            done, steps = False, 0
+            while not done and steps < max_ep_len and seen < frames:
+                obs = self.process_obs(obs_raw)                  
+                obs_f32 = (obs.astype(np.float32) / 255.0)[None] 
+                self.obs_rms.update(obs_f32)                     
                 a = self.env.action_space.sample()
-                next_obs_raw, _, terminated, truncated, _ = self.env.step(a)
-                obs = self.process_obs(next_obs_raw)
-                obs_tensor = self.obs_to_float_tensor(obs)
-                obs_buffer.append(obs_tensor.cpu().numpy())
-                
-                if terminated or truncated:
-                    break
-        
-        # Update RMS with collected observations
-        obs_array = np.stack(obs_buffer)
-        self.obs_rms.update(obs_array)
-        
-        print("Observation RMS warmup completed.")
-        print(f"Obs mean: {self.obs_rms.mean.mean():.4f}, Obs std: {np.sqrt(self.obs_rms.var.mean()):.4f}")
+                obs_raw, _, term, trunc, _ = self.env.step(a)
+                done = term or trunc
+                steps += 1
+                seen += 1
+
 
     def train(self, total_timesteps, max_episode_steps):
         current_timestep = 0
@@ -247,7 +233,6 @@ class DQN_RNDAgent:
         stats = EpisodeStats([], [], [])
         epsilon = self.rnd_cfg.epsilon_start
 
-        # Initialize observation RMS
         self._fit_obs_rms_warmup()
 
         obs_raw, _ = self.env.reset()
@@ -265,27 +250,21 @@ class DQN_RNDAgent:
             if ext_reward>0:
                 wandb.log({"ext_reward": ext_reward}, step=current_timestep)
 
-            # Update observation RMS with new observation
+            self.obs_rms.update((next_obs.astype(np.float32) / 255.0)[None, ...])
             next_obs_tensor = self.obs_to_float_tensor(next_obs)
-            self.obs_rms.update(next_obs_tensor.unsqueeze(0).cpu().numpy())
 
-            # Compute intrinsic reward
             int_reward_tensor = self.compute_intrinsic_reward(next_obs_tensor)
             int_reward = float(int_reward_tensor.item())
             episode_intrinsic_rewards_list.append(int_reward)
 
-            # Normalize intrinsic reward by running standard deviation as per paper
             discounted_return = self.reward_filter.update(int_reward)
             self.reward_rms.update(np.array([discounted_return]))
             
-            # Avoid division by zero
             reward_std = np.sqrt(self.reward_rms.var + 1e-8)
             normalized_int_reward = int_reward / reward_std
 
-            # Combine rewards - paper uses simple addition
             total_reward = self.extrinsic_coef * ext_reward + self.intrinsic_coef * normalized_int_reward
 
-            # Store transition
             self.replay_buffer.add(
                 obs=obs,
                 act=action,
@@ -299,23 +278,18 @@ class DQN_RNDAgent:
             if (current_timestep > self.rnd_cfg.learning_starts and 
                 self.replay_buffer.get_stored_size() >= self.batch_size):
                 
-                # Sample batch for both RND and DQN updates
                 batch = self.replay_buffer.sample(self.batch_size)
                 
-                # RND update - use current observations as per paper
                 self.update_rnd(batch)
                 
-                # DQN update on same batch
                 self.update_dqn(batch)
                 self._update_steps += 1
 
-                # Update target network
                 if self._update_steps % self.target_update_freq == 0:
                     self.target_q_net.load_state_dict(self.q_net.state_dict())
 
                 epsilon = max(self.rnd_cfg.epsilon_end, epsilon * self.rnd_cfg.epsilon_decay)
 
-            # Logging
             if current_timestep % 1000 == 0 and current_timestep > 0:
                 wandb.log({
                     "rewards/ext_reward": ext_reward,
@@ -326,7 +300,6 @@ class DQN_RNDAgent:
                     "diagnostics/reward_std": reward_std,
                 }, step=current_timestep)
 
-            # Update state and episode tracking
             obs = next_obs
             episode_return += total_reward
             episode_ext_return += ext_reward
@@ -334,9 +307,7 @@ class DQN_RNDAgent:
             episode_step += 1
             current_timestep += 1
 
-            # Episode end
             if done or episode_step >= max_episode_steps:
-                # Store episode intrinsic rewards for potential normalization
                 if episode_intrinsic_rewards_list:
                     self.episode_intrinsic_rewards.append(np.mean(episode_intrinsic_rewards_list))
                 
@@ -358,7 +329,6 @@ class DQN_RNDAgent:
                     f"Int: {episode_int_return:.2f} | Timesteps: {current_timestep}"
                 )
 
-                # Reset for next episode
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
                 self.increment_visit_counts()
@@ -369,7 +339,6 @@ class DQN_RNDAgent:
                 episode_num += 1
                 episode_intrinsic_rewards_list = []
 
-            # Periodic evaluation and visualization
             if current_timestep % 50_000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_rnd")
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="eval_rnd")
@@ -380,37 +349,27 @@ class DQN_RNDAgent:
 
     def update_rnd(self, batch):
         """Update RND predictor network"""
-        # Use current observations for RND update as per paper
+
         obs_batch = self.obs_to_float_tensor(batch["obs"])
         
-        # Normalize observations
         obs_mean = torch.from_numpy(self.obs_rms.mean).float().to(self.device)
         obs_var = torch.from_numpy(self.obs_rms.var).float().to(self.device)
-        obs_var = torch.clamp(obs_var, min=1e-4)
         
-        normalized_obs = (obs_batch - obs_mean) / torch.sqrt(obs_var)
+        normalized_obs = (obs_batch - obs_mean) / torch.sqrt(obs_var + 1e-8)
         normalized_obs = torch.clamp(normalized_obs, -5.0, 5.0)
 
-        # Forward pass
         pred, target = self.rnd(normalized_obs)
         
-        # MSE loss
         rnd_loss = F.mse_loss(pred, target, reduction='none').mean(dim=-1)
         
-        # Apply mask for training stability (keep only a fraction as per paper)
         mask = torch.rand_like(rnd_loss) < self.rnd_cfg.predictor_keep_ratio
         if mask.sum() == 0:
             mask = torch.ones_like(rnd_loss)
         
         loss = (rnd_loss * mask.float()).sum() / mask.float().sum()
 
-        # Update predictor
         self.rnd_optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(self.rnd.predictor_encoder.parameters()) + list(self.rnd.predictor_head.parameters()), 
-            40.0
-        )
         self.rnd_optimizer.step()
 
     def update_dqn(self, batch):
@@ -423,14 +382,11 @@ class DQN_RNDAgent:
         int_norm = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(self.device)
         done = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
 
-        # Combined reward
         total_rew = self.extrinsic_coef * ext + self.intrinsic_coef * int_norm
 
-        # Current Q-values
         q_vals = self.q_net(obs)
         q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)
 
-        # Target Q-values (Double DQN)
         with torch.no_grad():
             next_q_vals = self.q_net(next_obs)
             next_actions = next_q_vals.argmax(1)
@@ -438,13 +394,10 @@ class DQN_RNDAgent:
             max_next_q = target_q_vals.gather(1, next_actions.unsqueeze(1)).squeeze(1)
             target = total_rew + (1 - done) * self.gamma * max_next_q
 
-        # Huber loss for stability
         loss = F.smooth_l1_loss(q_val, target)
         
-        # Update Q-network
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), 10.0)
         self.optimizer.step()
 
     def plot_intrinsic_vs_true_bonus_heatmap_minigrid_rnd(self, step):
@@ -469,16 +422,14 @@ class DQN_RNDAgent:
 
         base_env = self.eval_env.unwrapped
         try:
-            base_env.tile_size = 4  # match RGBImgObsWrapper(tile_size=4)
+            base_env.tile_size = 4  
         except Exception:
             pass
         
-        # Get reward standard deviation for normalization
         reward_std = np.sqrt(self.reward_rms.var + 1e-8)
 
         for y in range(h):
             for x in range(w):
-                # skip walls if we can detect them
                 try:
                     cell = base_env.grid.get(x + 1, y + 1)
                     if Wall is not None and isinstance(cell, Wall):
@@ -505,7 +456,6 @@ class DQN_RNDAgent:
                 except Exception:
                     continue
 
-        # Create visualization
         true_mask = visit_counts == 0
         true_bonus_masked = np.ma.array(true_bonus, mask=true_mask)
 
@@ -618,10 +568,9 @@ def main():
     eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
     eval_env = ImgObsWrapper(eval_env)
 
-    max_episode_steps = 400
+    max_episode_steps = 250
     total_timesteps = 1_000_000
 
-    # Adjusted hyperparameters based on RND paper
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 256,  
         "lr": 1e-4,
@@ -639,7 +588,7 @@ def main():
         "learning_starts": 5_000,
         "epsilon_start": 1.0,
         "epsilon_end": 0.05, 
-        "epsilon_decay": 0.9995,  
+        "epsilon_decay": 0.99995,  
         "predictor_keep_ratio": 0.25,
     })
 

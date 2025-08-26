@@ -2,7 +2,9 @@ import math
 import sys
 import os
 
-from utils.heatmaps_utils import log_small_multiples_heatmaps
+from matplotlib import pyplot as plt
+
+from utils.heatmaps_utils import log_small_multiples_heatmaps, plot_cfn_difficulty_panels
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import time
@@ -46,10 +48,18 @@ class DQN_CFNAgent:
       - td target uses r + λ * b(s)
     """
     def __init__(self, env, eval_env, env_name, dqn_cfg, cfn_cfg):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.use_amp = (self.device.type == "cuda")
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+
+        if self.use_amp:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
         self.env = env
         self.eval_env = eval_env
         self.env_name = env_name
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # obs/act spaces
         self.obs_shape_hw_c = env.observation_space.shape  # (h,w,c)
@@ -77,12 +87,14 @@ class DQN_CFNAgent:
             env_dict={
                 "obs":      {"shape": self.obs_shape, "dtype": np.uint8},
                 "act":      {"shape": 1, "dtype": np.int16},
-                "rew":      {"shape": 1, "dtype": np.float32},   # extrinsic
-                "intr":     {"shape": 1, "dtype": np.float32},   # b(s)
-                "done":     {"shape": 1, "dtype": np.bool_},
+                "rew":      {"shape": 1, "dtype": np.float32},
+                "intr":     {"shape": 1, "dtype": np.float32},
+                "term":     {"shape": 1, "dtype": np.bool_},  
+                "timeout":  {"shape": 1, "dtype": np.bool_},   
                 "next_obs": {"shape": self.obs_shape, "dtype": np.uint8},
             },
         )
+        
 
         # cfn pieces
         self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
@@ -119,11 +131,10 @@ class DQN_CFNAgent:
 
     # utils
     def process_obs(self, obs):
-        if isinstance(obs, dict) and 'image' in obs:
-            obs = obs['image']
-        x = np.asarray(obs, dtype=np.uint8)
-        assert x.ndim == 3, f"unexpected obs ndim: {x.ndim}"
-        return np.transpose(x, (2, 0, 1))  # (c,h,w)
+        # makes sure obs is numpy array, and conversts its numbers to 8-bit integers [0-255]
+        x = np.asarray(obs, dtype=np.uint8) # x.shape is (h,w,c) (40, 40, 3)
+        x = np.transpose(x, (2, 0, 1))  
+        return np.ascontiguousarray(x)
 
     def increment_visit_counts(self):
         x, y = map(int, self.env.unwrapped.agent_pos)
@@ -138,10 +149,9 @@ class DQN_CFNAgent:
         # b(s) = ||f(s)|| / sqrt(d)
         return (pred.norm(p=2, dim=1) / math.sqrt(self.coin_flip_dim)).item()
 
-    def act(self, obs, epsilon):
-        if np.random.rand() < epsilon:
-            return self.env.action_space.sample()
-        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
+    def act(self, obs_tensor, epsilon):
+        # if np.random.rand() < epsilon:
+        #     return self.env.action_space.sample()
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
             a = int(q_values.argmax().item())
@@ -161,9 +171,11 @@ class DQN_CFNAgent:
         while current_timestep < total_timesteps:
             # decay epsilon each step
             self.epsilon = max(self.eps_end, self.epsilon * self.eps_decay)
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
+
 
             # act
-            action = self.act(obs, self.epsilon)
+            action = self.act(obs_tensor, self.epsilon)
 
             # step env
             next_obs_raw, reward, terminated, truncated, _info = self.env.step(action)
@@ -177,8 +189,9 @@ class DQN_CFNAgent:
                 }, step=current_timestep)
 
             # compute intrinsic bonus on s_t
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
-            bonus = self._bonus_from_obs_tensor(obs_tensor)
+            # next_obs_tensor = torch.tensor(next_obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
+            bonus = self._bonus_from_obs_tensor(obs_tensor)   
+
 
             # store in rl replay
             self.replay_buffer.add(
@@ -186,7 +199,8 @@ class DQN_CFNAgent:
                 act=action,
                 rew=float(reward),
                 intr=float(bonus),
-                done=done,
+                term=bool(terminated),
+                timeout=bool(truncated),
                 next_obs=next_obs,
             )
 
@@ -223,10 +237,10 @@ class DQN_CFNAgent:
                     pseudo = self.coin_flip_dim / max(z2, 1e-8) 
                     
                 wandb.log({
-                    "charts/epsilon": float(self.epsilon),
-                    f"cfn/int_reward({ay-1},{ax-1})": float(bonus),
-                    f"cfn/pseudocount({ay-1},{ax-1})": float(pseudo),
-                    "cfn/output_norm2": float(z2),
+                    # "charts/epsilon": float(self.epsilon),
+                    f"cfn/int_reward": float(bonus),
+                    f"cfn/pseudocount": float(pseudo),
+                    # "cfn/output_norm2": float(z2),
                 }, step=current_timestep)
 
             # bookkeeping
@@ -261,9 +275,11 @@ class DQN_CFNAgent:
             if current_timestep % 50_000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_cfn")
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn")
-            if current_timestep % 100_000 == 0 and current_timestep > 0:
+            if current_timestep % 100_000 == 0 or current_timestep == 10:
                 self.log_doorkey_true_vs_pseudo_counts(self.visit_counts, step=current_timestep)
-                log_small_multiples_heatmaps(self, current_timestep, grid_h=8, grid_w=8, mask_walls=True)
+                log_small_multiples_heatmaps(self, current_timestep, grid_h=8, grid_w=8, mask_walls=True, method_name="cfn")
+                plot_cfn_difficulty_panels(self, step=current_timestep, show_counts=True, add_scatter=True)
+
 
     # q update
     def update_q(self, batch, current_timestep):
@@ -272,26 +288,29 @@ class DQN_CFNAgent:
         act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
         rew = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)
         intr = torch.from_numpy(batch["intr"].squeeze(-1)).float().to(self.device)
-        done = torch.from_numpy(batch["done"].squeeze(-1)).float().to(self.device)
+        term = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)  
 
         # r_aug = r + λ * b(s)
         r_aug = rew + self.lambda_bonus * intr
 
-        q_vals = self.q_net(obs)
-        q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)
+        # in update_q
+        with torch.amp.autocast('cuda', enabled=self.use_amp):
+            q_vals = self.q_net(obs)
+            q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)
 
-        with torch.no_grad():
-            next_q_vals_main = self.q_net(next_obs)
-            next_actions = next_q_vals_main.argmax(1)
-            next_q_vals_target = self.target_q_net(next_obs)
-            max_next_q = next_q_vals_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
-            target = r_aug + (1.0 - done) * self.gamma * max_next_q
+            with torch.no_grad():
+                next_q_vals_main = self.q_net(next_obs)
+                next_actions = next_q_vals_main.argmax(1)
+                next_q_vals_target = self.target_q_net(next_obs)
+                max_next_q = next_q_vals_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+                target = r_aug + (1.0 - term) * self.gamma * max_next_q
 
-        loss = F.smooth_l1_loss(q_val, target)
+            loss = F.smooth_l1_loss(q_val, target)
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
 
         if self.step_count % 10000 == 0:
             wandb.log({
@@ -302,15 +321,19 @@ class DQN_CFNAgent:
 
     # cfn update
     def update_cfn(self, obs_batch, coin_flip_batch, current_timestep):
-        obs_tensor = torch.tensor(obs_batch, dtype=torch.float32, device=self.device)
+        obs_tensor = torch.tensor(obs_batch, dtype=torch.float32, device=self.device) / 255.0
         coin_tensor = torch.tensor(coin_flip_batch, dtype=torch.float32, device=self.device)
 
-        pred = self.cfn(obs_tensor)
-        cfn_loss = F.mse_loss(pred, coin_tensor)
+        # update_cfn
+        with torch.amp.autocast('cuda', enabled=self.use_amp):
+            pred = self.cfn(obs_tensor)
+            cfn_loss = F.mse_loss(pred, coin_tensor)
 
-        self.cfn_optimizer.zero_grad()
-        cfn_loss.backward()
-        self.cfn_optimizer.step()
+        self.cfn_optimizer.zero_grad(set_to_none=True)
+        self.scaler.scale(cfn_loss).backward()
+        self.scaler.step(self.cfn_optimizer)
+        self.scaler.update()
+
 
         if self.step_count % 10000 == 0:
             wandb.log({"training/cfn_loss": float(cfn_loss.item())}, step=current_timestep)
@@ -321,27 +344,21 @@ class DQN_CFNAgent:
     from minigrid.core.world_object import Wall
 
     def log_doorkey_true_vs_pseudo_counts(self, visit_counts, step, save_path=None):
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import torch
-        import wandb
-
+        
         base_env = self.eval_env.unwrapped
         # make render match training tiles
         try:
-            base_env.tile_size = 4  # match RGBImgObsWrapper(tile_size=4)
+            base_env.tile_size = 4  # RGBImgObsWrapper(tile_size=4)
         except Exception:
             pass
 
         h, w = visit_counts.shape
         true_bonus  = 1.0 / np.sqrt(visit_counts + 1e-8)
-        approx_bonus = np.full_like(true_bonus, np.nan, dtype=np.float32)  # default nan for walls/unreachable
+        approx_bonus = np.full_like(true_bonus, np.nan, dtype=np.float32)  
 
         for y in range(h):
             for x in range(w):
                 cell = base_env.grid.get(x+1, y+1)
-                if isinstance(cell, Wall):
-                    continue  # skip wall cells
 
                 base_env.reset()
                 base_env.agent_pos = (x + 1, y + 1)
@@ -373,6 +390,13 @@ class DQN_CFNAgent:
         im1 = axs[0].imshow(true_bonus_masked, cmap="Greens")
         axs[0].set_title("true bonus 1/√(visits)")
         plt.colorbar(im1, ax=axs[0])
+
+    
+        for y in range(h):
+            for x in range(w):
+                axs[0].text(x, y, str(int(visit_counts[y, x])),
+                            ha="center", va="center", fontsize=8, color="black")
+            
         im2 = axs[1].imshow(clipped, cmap="viridis", vmin=vmin, vmax=vmax)
         axs[1].set_title("intrinsic bonus (cfn)")
         plt.colorbar(im2, ax=axs[1])
@@ -442,17 +466,17 @@ def main():
     lr = 3e-4
     gamma = 0.99
     batch_size = 256
-    replay_buffer_size = 1_000_000
+    replay_buffer_size = 500_000
     target_update_freq = 2_000
     learning_starts = 5_000
 
     cfn_coin_flip_dim = 20
     cfn_lr = 1e-4
     cfn_replay_buffer_size = 1_000_000
-    cfn_batch_size = 1_024
+    cfn_batch_size = 512
     epsilon_start = 1.0
     epsilon_end   = 0.01
-    epsilon_decay = 0.99995
+    epsilon_decay = 0.99998  
 
     steps_to_min = 200_000
     epsilon_start = 1.0
@@ -460,7 +484,7 @@ def main():
     epsilon_decay = float(np.exp(np.log(epsilon_end/epsilon_start) / steps_to_min))
 
     # intrinsic scale (λ) per paper
-    cfn_intrinsic_scale = 0.03  # try 0.003–0.03
+    cfn_intrinsic_scale = 0.01  # per paper: {0.001, 0.003, 0.01, 0.03}
 
     # pack cfgs
     dqn_cfg = type("DQNConfig", (), {

@@ -11,19 +11,12 @@ def layer_init(m, std=1.0):
     return m
 
 class CoinFlipNetworkCNN(nn.Module):
-    """
-    cfn predictor + frozen random prior (paper-faithful)
-      - conv stack keeps spatial resolution
-      - prior is whitened with running mean/var
-      - output f(s) = pred(s) + whitened_prior(s)
-    """
     def __init__(self, obs_shape, coin_dim, device=None):
         super().__init__()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        c, h, w = obs_shape  # e.g. (3, 6, 6)
+        c, h, w = obs_shape  
         self.coin_flip_dim = int(coin_dim)
 
-        # encoder (no pooling that collapses to 1x1/2x2)
         def make_encoder():
             return nn.Sequential(
                 layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1)),
@@ -36,13 +29,11 @@ class CoinFlipNetworkCNN(nn.Module):
         self.net_encoder   = make_encoder()
         self.prior_encoder = make_encoder()
 
-        # infer feature dim safely
         with torch.no_grad():
             dummy = torch.zeros(1, c, h, w)
             feat_dim = self.net_encoder(dummy).shape[1]
         self.feature_dim = int(feat_dim)
 
-        # heads
         self.net_head = nn.Sequential(
             layer_init(nn.Linear(self.feature_dim, 256)),
             nn.ReLU(),
@@ -54,20 +45,17 @@ class CoinFlipNetworkCNN(nn.Module):
             layer_init(nn.Linear(256, coin_dim)),
         )
 
-        # freeze prior
         for p in list(self.prior_encoder.parameters()) + list(self.prior_head.parameters()):
             p.requires_grad = False
 
-        # running stats for prior whitening
         self.register_buffer("prior_mean",   torch.zeros(coin_dim))
-        self.register_buffer("prior_var",    torch.ones(coin_dim) * 1e-2)  # small positive
+        self.register_buffer("prior_var",    torch.ones(coin_dim) * 1e-2)  
         self.register_buffer("prior_count",  torch.tensor(1.0))
 
         self.to(self.device)
 
     @torch.no_grad()
     def _update_prior_stats(self, prior_batch):
-        # welford-style update per dimension
         b = prior_batch.shape[0]
         batch_mean = prior_batch.mean(dim=0)
         batch_var  = prior_batch.var(dim=0, unbiased=False).clamp_min(1e-8)
@@ -75,7 +63,6 @@ class CoinFlipNetworkCNN(nn.Module):
         total = self.prior_count + b
         delta = batch_mean - self.prior_mean
         new_mean = self.prior_mean + delta * (b / total)
-        # combine variances
         m_a = self.prior_var * self.prior_count
         m_b = batch_var * b
         m2  = m_a + m_b + (delta**2) * (self.prior_count * b / total)
@@ -94,13 +81,12 @@ class CoinFlipNetworkCNN(nn.Module):
         net_feat   = self.net_encoder(x)
         prior_feat = self.prior_encoder(x)
 
-        pred  = self.net_head(net_feat)             # (B,d)
-        prior = self.prior_head(prior_feat)         # (B,d)
+        pred  = self.net_head(net_feat)             
+        prior = self.prior_head(prior_feat)         
 
         if update_prior_stats:
             self._update_prior_stats(prior.detach())
 
-        # whiten prior
         std = torch.sqrt(self.prior_var + 1e-8)
         prior_white = (prior - self.prior_mean) / std
 

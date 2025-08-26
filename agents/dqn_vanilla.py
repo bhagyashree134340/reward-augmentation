@@ -9,14 +9,16 @@ import numpy as np
 import wandb
 import random
 import gymnasium as gym
-from collections import deque
 from pathlib import Path
 from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper
+from agents import customised_doorkey
 from networks.ddqn import DDQN
 from utils.validate import validate_dqn
 from utils.evaluate import evaluate_dqn
 from utils.stats import EpisodeStats
 import logging
+from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
+from cpprb import ReplayBuffer  # <-- NEW
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ class DQNAgent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.obs_shape = env.observation_space.shape
+        # torch format (C,H,W)
         self.obs_shape_torch = (self.obs_shape[2], self.obs_shape[0], self.obs_shape[1])
         self.act_dim = env.action_space.n
 
@@ -39,28 +42,39 @@ class DQNAgent:
         self.gamma = cfg.gamma
         self.batch_size = cfg.batch_size
         self.target_update_freq = cfg.target_update_freq
-        self.replay_buffer = deque(maxlen=cfg.replay_buffer_size)
+
+        ## --- inside __init__ right before building env_dict ---
+        C, H, W = map(int, self.obs_shape_torch)   # ensure python ints
+
+        env_dict = {
+            "obs":      {"shape": (C, H, W), "dtype": np.uint8},
+            "next_obs": {"shape": (C, H, W), "dtype": np.uint8},
+            # for scalars, either omit shape or set to (1,)
+            "act":      {"dtype": np.int64},
+            "rew":      {"dtype": np.float32},
+            "done":     {"dtype": np.bool_},
+        }
+
+        # !!! cast capacity to int to avoid numpy.float64 sneaking in
+        self.replay_buffer = ReplayBuffer(int(cfg.replay_buffer_size), env_dict)
 
     def process_obs(self, obs):
         if isinstance(obs, dict) and 'image' in obs:
             obs = obs['image']
-        return np.transpose(np.array(obs, dtype=np.uint8), (2, 0, 1))
+        # keep as uint8 (C,H,W)
+        return np.transpose(np.asarray(obs, dtype=np.uint8), (2, 0, 1))
 
     def act(self, obs, epsilon):
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
-        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        # normalize only for network input
+        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
         return q_values.argmax().item()
 
-    def update(self, batch, current_timestep, update_count):
-        obs, act, rew, next_obs, done = map(np.array, zip(*batch))
-        obs = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        next_obs = torch.tensor(next_obs, dtype=torch.float32).to(self.device)
-        act = torch.tensor(act, dtype=torch.long, device=self.device)
-        rew = torch.tensor(rew, dtype=torch.float32, device=self.device)
-        done = torch.tensor(done, dtype=torch.float32, device=self.device)
+    def update(self, batch_tensors, current_timestep, update_count):
+        obs, act, rew, next_obs, done = batch_tensors  # already tensors on device
 
         q_vals = self.q_net(obs)
         q_val = q_vals.gather(1, act.unsqueeze(1)).squeeze(1)
@@ -84,10 +98,29 @@ class DQNAgent:
                 "training/target_mean": target.mean().item(),
             }, step=current_timestep)
 
+    def sample_from_rb(self, batch_size):
+        batch = self.replay_buffer.sample(batch_size)
+
+        # Images: uint8 -> float32 in [0,1]
+        obs = torch.as_tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
+        next_obs = torch.as_tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
+
+        # Scalars may come as (N,1); squeeze last axis if present
+        def _to_1d(x):
+            x = np.asarray(x)
+            return x.squeeze(-1) if x.ndim == 2 and x.shape[-1] == 1 else x
+
+        act = torch.as_tensor(_to_1d(batch["act"]), dtype=torch.long, device=self.device)
+        rew = torch.as_tensor(_to_1d(batch["rew"]), dtype=torch.float32, device=self.device)
+        done = torch.as_tensor(_to_1d(batch["done"]).astype(np.float32), dtype=torch.float32, device=self.device)
+
+        return obs, act, rew, next_obs, done
+
+
     def train(self, total_timesteps, max_episode_steps, epsilon_start, epsilon_end, epsilon_decay):
         current_timestep = 0
         episode_num = 0
-        episode_return = 0
+        episode_return = 0.0
         episode_step = 0
         update_count = 0
 
@@ -106,25 +139,31 @@ class DQNAgent:
 
             done = terminated or truncated
 
-            if reward>0:
-                wandb.log({
-                    "reward": reward
-                }, step = current_timestep)
+            if reward > 0:
+                wandb.log({"reward": reward}, step=current_timestep)
 
-            self.replay_buffer.append((obs, action, reward, next_obs, done))
+            # ---- cpprb add (obs stored as uint8) ----
+            self.replay_buffer.add(
+                obs=obs, act=action, rew=reward, next_obs=next_obs, done=done
+            )
+            # -----------------------------------------
 
-            if current_timestep >= learning_starts and len(self.replay_buffer) >= self.batch_size:
-                batch = random.sample(self.replay_buffer, self.batch_size)
-                self.update(batch, current_timestep, update_count)
+            if current_timestep >= learning_starts and self.replay_buffer.get_stored_size() >= self.batch_size:
+
+                batch_tensors = self.sample_from_rb(self.batch_size)
+                self.update(batch_tensors, current_timestep, update_count)
                 update_count += 1
 
-            if current_timestep % self.target_update_freq == 0:
-                self.target_q_net.load_state_dict(self.q_net.state_dict())
+                # target update tied to learning steps
+                if update_count % self.target_update_freq == 0:
+                    self.target_q_net.load_state_dict(self.q_net.state_dict())
 
             obs = next_obs
             episode_return += reward
             episode_step += 1
             current_timestep += 1
+
+            wandb.log({"charts/epsilon": epsilon}, step=current_timestep)
 
             if done:
                 stats.episode_rewards.append(episode_return)
@@ -139,7 +178,7 @@ class DQNAgent:
 
                 print(
                     f"Episode {episode_num} | Steps: {episode_step} | "
-                    f"Return: {reward:.2f} | Epsilon: {epsilon:.3f} | "
+                    f"Return: {episode_return:.2f} | Epsilon: {epsilon:.3f} | "
                     f"Total Timesteps: {current_timestep}"
                 )
 
@@ -148,33 +187,72 @@ class DQNAgent:
 
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
-                episode_return = 0
+                episode_return = 0.0
                 episode_step = 0
                 episode_num += 1
 
             if current_timestep % 10000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep)
-                evaluate_dqn(self, self.env, current_timestep)
+                evaluate_dqn(self, self.eval_env, current_timestep)
 
 def main():
-    ENV_NAME = "MiniGrid-DoorKey-6x6-v0"
-    wandb.init(project="dqn", name="vanilla-dqn")
+    wandb.init(project="dqn", name="vanilla_dqn_doorkey")
+    ENV_NAME = "Fixed-DoorKey-6x6-v0"
 
-    env = gym.make(ENV_NAME, render_mode="rgb_array", max_episode_steps=250)
+    env = gym.make(
+        "Fixed-DoorKey-v0",
+        size=10,
+        key_pos=(1, 8),
+        door_pos=(5, 5),
+        goal_pos=(8, 1),
+        agent_start_pos=(1, 1),
+        agent_start_dir=0,
+        disable_env_checker=True,
+        max_episode_steps=400,
+        render_mode="rgb_array",
+    )
+    env = customised_doorkey.NoDropWrapper(env)
+    env = customised_doorkey.PatchGridWrapper(
+        env,
+        wall_cells=[(6, 1), (7, 1)],   
+        goal_cell=(7,0),              
+    )
     env = FullyObsWrapper(env)
+    env = RGBImgObsWrapper(env, tile_size=4)
     env = ImgObsWrapper(env)
 
-    eval_env = gym.make(ENV_NAME, render_mode="rgb_array", max_episode_steps=250)
+    eval_env = gym.make(
+        "Fixed-DoorKey-v0",
+        size=10,
+        key_pos=(1, 8),
+        door_pos=(5, 5),
+        goal_pos=(8, 1),
+        agent_start_pos=(1, 1),
+        agent_start_dir=0,
+        disable_env_checker=True,
+        max_episode_steps=400,
+        render_mode="rgb_array",
+    )
+    eval_env = customised_doorkey.NoDropWrapper(eval_env)
+    eval_env = customised_doorkey.PatchGridWrapper(
+        eval_env,
+        wall_cells=[(6, 1), (7, 1)],   
+        goal_cell=None,              
+    )
     eval_env = FullyObsWrapper(eval_env)
+    eval_env = RGBImgObsWrapper(eval_env, tile_size=4)
     eval_env = ImgObsWrapper(eval_env)
+
+    total_timesteps   = 1_000_000
+    max_episode_steps = 300
 
     cfg = type("DQNConfig", (), {
         "hidden_size": 256,
         "lr": 1e-5,
         "gamma": 0.99,
         "batch_size": 128,
-        "replay_buffer_size": 1_000_000,
-        "target_update_freq": 2000,
+        "replay_buffer_size": 1_000_000,  # stays large; uint8 keeps this feasible
+        "target_update_freq": 2000,       # now counts learning steps
     })
 
     epsilon_start = 1.0
@@ -185,8 +263,8 @@ def main():
 
     start = time.time()
     agent.train(
-        total_timesteps=1_000_000,
-        max_episode_steps=250,
+        total_timesteps=total_timesteps,
+        max_episode_steps=max_episode_steps,
         epsilon_start=epsilon_start,
         epsilon_end=epsilon_end,
         epsilon_decay=epsilon_decay

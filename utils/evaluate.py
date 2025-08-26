@@ -2,68 +2,62 @@ import os
 
 import imageio
 import numpy as np
+import torch
 
 
 def evaluate_dqn(agent, eval_env, step, save_dir="eval", num_episodes=10, log_to_wandb=True, fps=6):
     os.makedirs(save_dir, exist_ok=True)
     returns, lengths = [], []
 
-    # switch to eval mode; restore afterwards
-    was_training = agent.q_net.training
-    agent.q_net.eval()
 
-    try:
-        for ep in range(num_episodes):
-            obs_raw, _ = eval_env.reset()
-            obs = agent.process_obs(obs_raw)  # Use the same processing as training
-            done = False
-            total_return = 0.0
-            ep_len = 0
+    for ep in range(num_episodes):
+        obs_raw, _ = eval_env.reset()
+        obs = agent.process_obs(obs_raw)  # Use the same processing as training
+        done = False
+        total_return = 0.0
+        ep_len = 0
 
-            frames = []
-            # only record the first episode to save time/space
-            record_gif = (ep == 0)
+        frames = []
+        record_gif = (ep == 0)
+
+        if record_gif:
+            frames.append(eval_env.render())
+
+        
+        while not done:
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0) / 255.0
+            action = agent.act(obs_t, epsilon=0.0)
+
+            next_obs_raw, reward, terminated, truncated, _ = eval_env.step(action)
+            done = bool(terminated or truncated)
+            obs = agent.process_obs(next_obs_raw)  
+
+            total_return += float(reward)
+            ep_len += 1
 
             if record_gif:
                 frames.append(eval_env.render())
 
-            # greedy evaluation (epsilon = 0)
-            while not done:
-                action = agent.act(obs, epsilon=0.0)
+        returns.append(total_return)
+        lengths.append(ep_len)
 
-                next_obs_raw, reward, terminated, truncated, _ = eval_env.step(action)
-                done = bool(terminated or truncated)
-                obs = agent.process_obs(next_obs_raw)  # FIXED: Use proper obs processing
+        if record_gif:
+            gif_path = os.path.join(save_dir, f"eval_step{step}_ep{ep}.gif")
+            imageio.mimsave(gif_path, frames, fps=fps)
+            if log_to_wandb:
+                import wandb
+                wandb.log({f"eval/gif_episode_{ep}": wandb.Video(gif_path, fps=fps, format="gif")}, step=step)
 
-                total_return += float(reward)
-                ep_len += 1
+    returns = np.array(returns, dtype=np.float32)
+    lengths = np.array(lengths, dtype=np.int32)
+    np.savez(os.path.join(save_dir, f"eval_step_{step}.npz"), returns=returns, lengths=lengths)
 
-                if record_gif:
-                    frames.append(eval_env.render())
+    if log_to_wandb:
+        import wandb
+        wandb.log({
+            "eval/mean_return": float(returns.mean()),
+            "eval/std_return":  float(returns.std()),
+            "eval/mean_length": float(lengths.mean()),
+        }, step=step)
 
-            returns.append(total_return)
-            lengths.append(ep_len)
-
-            if record_gif:
-                gif_path = os.path.join(save_dir, f"eval_step{step}_ep{ep}.gif")
-                imageio.mimsave(gif_path, frames, fps=fps)
-                if log_to_wandb:
-                    import wandb
-                    wandb.log({f"eval/gif_episode_{ep}": wandb.Video(gif_path, fps=fps, format="gif")}, step=step)
-
-        returns = np.array(returns, dtype=np.float32)
-        lengths = np.array(lengths, dtype=np.int32)
-        np.savez(os.path.join(save_dir, f"eval_step_{step}.npz"), returns=returns, lengths=lengths)
-
-        if log_to_wandb:
-            import wandb
-            wandb.log({
-                "eval/mean_return": float(returns.mean()),
-                "eval/std_return":  float(returns.std()),
-                "eval/mean_length": float(lengths.mean()),
-            }, step=step)
-
-        print(f"[EVAL] step {step} | avg return: {returns.mean():.3f} | avg len: {lengths.mean():.1f}")
-    finally:
-        if was_training:
-            agent.q_net.train()
+    print(f"[EVAL] step {step} | avg return: {returns.mean():.3f} | avg len: {lengths.mean():.1f}")
