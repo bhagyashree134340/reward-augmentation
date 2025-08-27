@@ -4,6 +4,7 @@ import os
 
 from matplotlib import pyplot as plt
 
+from agents.dqn_rnd import RunningMeanStd
 from utils.heatmaps_utils import log_small_multiples_heatmaps, plot_cfn_difficulty_panels
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -30,6 +31,9 @@ from CFN.priority_util import get_coin_flips
 from utils.validate import validate_dqn
 from utils.evaluate import evaluate_dqn
 
+
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] - %(message)s",
@@ -53,6 +57,9 @@ class DQN_CFNAgent:
         self.use_amp = (self.device.type == "cuda")
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_amp)
 
+        self.int_rms = RunningMeanStd(shape=())   # scalar rewards
+        self.int_clip = getattr(cfn_cfg, "cfn_int_clip", None)  # optional
+
         if self.use_amp:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
@@ -74,7 +81,7 @@ class DQN_CFNAgent:
         self.q_net = DDQN(self.obs_shape, self.act_dim, dqn_cfg.hidden_size, is_cnn=True).to(self.device)
         self.target_q_net = DDQN(self.obs_shape, self.act_dim, dqn_cfg.hidden_size, is_cnn=True).to(self.device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
-        self.optimizer = optim.Adam(self.q_net.parameters(), lr=dqn_cfg.lr)
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=1.25e-4, eps=1.5e-4)
 
         self.gamma = dqn_cfg.gamma
         self.batch_size = dqn_cfg.batch_size
@@ -103,7 +110,8 @@ class DQN_CFNAgent:
             coin_dim=self.coin_flip_dim,
             device=self.device
         ).to(self.device)
-        self.cfn_optimizer = optim.Adam(self.cfn.parameters(), lr=cfn_cfg.cfn_lr)
+        self.cfn_optimizer = optim.RMSprop(self.cfn.parameters(), lr=1e-4, momentum=0.9, eps=1e-4)
+
 
         self.cfn_buffer = CFNReplayBufferWrapper(
             size=cfn_cfg.cfn_replay_buffer_size,
@@ -116,9 +124,12 @@ class DQN_CFNAgent:
         self.lambda_bonus = cfn_cfg.cfn_intrinsic_scale
 
         # epsilon-greedy
-        self.epsilon = cfn_cfg.epsilon_start
-        self.eps_end = cfn_cfg.epsilon_end
-        self.eps_decay = cfn_cfg.epsilon_decay
+        self.eps_start = 1.0
+        self.eps_end = 0.001
+        self.eps_decay_steps = 1_000
+        self.eval_epsilon = 0.001
+
+        self.epsilon = self.eps_start
 
         # cfn batch size
         self.cfn_batch_size = cfn_cfg.cfn_batch_size
@@ -133,25 +144,31 @@ class DQN_CFNAgent:
     def process_obs(self, obs):
         # makes sure obs is numpy array, and conversts its numbers to 8-bit integers [0-255]
         x = np.asarray(obs, dtype=np.uint8) # x.shape is (h,w,c) (40, 40, 3)
-        x = np.transpose(x, (2, 0, 1))  
-        return np.ascontiguousarray(x)
+        return np.transpose(x, (2, 0, 1))  
 
     def increment_visit_counts(self):
         x, y = map(int, self.env.unwrapped.agent_pos)
         self.visit_counts[(y - 1), (x - 1)] += 1
 
     @torch.no_grad()
-    def _bonus_from_obs_tensor(self, obs_tensor) -> float:
-        """
-        b(s) = sqrt(||f(s)||^2 / d)
-        """
-        pred = self.cfn(obs_tensor, update_prior_stats=True)   # (1, d)
-        # b(s) = ||f(s)|| / sqrt(d)
-        return (pred.norm(p=2, dim=1) / math.sqrt(self.coin_flip_dim)).item()
+    def _bonus_from_obs_tensor(self, obs_tensor):
+
+        pred = self.cfn(obs_tensor, update_prior_stats=True)
+        bonus_raw = (pred.norm(dim=1) / math.sqrt(self.coin_flip_dim)).item()
+
+        
+        mu  = float(np.asarray(self.int_rms.mean))
+        std = float(np.sqrt(np.asarray(self.int_rms.var)) + 1e-8)
+        b_norm = (bonus_raw - mu) / std
+
+        self.int_rms.update(np.array([bonus_raw], dtype=np.float32))
+
+        return float(b_norm)
+
 
     def act(self, obs_tensor, epsilon):
-        # if np.random.rand() < epsilon:
-        #     return self.env.action_space.sample()
+        if np.random.rand() < epsilon:
+            return self.env.action_space.sample()
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
             a = int(q_values.argmax().item())
@@ -169,8 +186,9 @@ class DQN_CFNAgent:
         self.increment_visit_counts()
 
         while current_timestep < total_timesteps:
-            # decay epsilon each step
-            self.epsilon = max(self.eps_end, self.epsilon * self.eps_decay)
+            frac = min(1.0, current_timestep / self.eps_decay_steps)
+            self.epsilon = self.eps_start + frac * (self.eps_end - self.eps_start)
+
             obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
 
 
@@ -192,13 +210,27 @@ class DQN_CFNAgent:
             # next_obs_tensor = torch.tensor(next_obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
             bonus = self._bonus_from_obs_tensor(obs_tensor)   
 
+            
+
+
+            # if self.int_clip is not None:
+            #     b_norm = np.clip(b_norm, -self.int_clip, self.int_clip)
+
+
+            if current_timestep % 1000 == 0:
+                wandb.log({
+                    # "cfn/int_reward_raw": float(bonus),
+                    "cfn/int_reward_norm": self.lambda_bonus * bonus,
+                    "cfn/bonus_rms/std": float(np.sqrt(self.int_rms.var)),
+                }, step=current_timestep)
+
 
             # store in rl replay
             self.replay_buffer.add(
                 obs=obs,
                 act=action,
                 rew=float(reward),
-                intr=float(bonus),
+                intr=float(bonus) if current_timestep >= self.learning_starts else 0.0,
                 term=bool(terminated),
                 timeout=bool(truncated),
                 next_obs=next_obs,
@@ -229,19 +261,19 @@ class DQN_CFNAgent:
                 self.target_q_net.load_state_dict(self.q_net.state_dict())
 
             # light logging
-            if current_timestep % 1000 == 0:
-                ax, ay = map(int, self.env.unwrapped.agent_pos)
+            # if current_timestep % 1000 == 0:
+            #     ax, ay = map(int, self.env.unwrapped.agent_pos)
 
-                with torch.no_grad():
-                    z2 = self.cfn.compute_squared_output_norm(obs_tensor).item()  
-                    pseudo = self.coin_flip_dim / max(z2, 1e-8) 
+            #     with torch.no_grad():
+            #         z2 = self.cfn.compute_squared_output_norm(obs_tensor).item()  
+            #         pseudo = self.coin_flip_dim / max(z2, 1e-8) 
                     
-                wandb.log({
-                    # "charts/epsilon": float(self.epsilon),
-                    f"cfn/int_reward": float(bonus),
-                    f"cfn/pseudocount": float(pseudo),
-                    # "cfn/output_norm2": float(z2),
-                }, step=current_timestep)
+            #     wandb.log({
+            #         # "charts/epsilon": float(self.epsilon),
+            #         f"cfn/int_reward": float(bonus),
+            #         f"cfn/pseudocount": float(pseudo),
+            #         # "cfn/output_norm2": float(z2),
+            #     }, step=current_timestep)
 
             # bookkeeping
             obs = next_obs
@@ -274,7 +306,7 @@ class DQN_CFNAgent:
             # periodic eval and heatmap
             if current_timestep % 50_000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_cfn")
-                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn")
+                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=0.0)
             if current_timestep % 100_000 == 0 or current_timestep == 10:
                 self.log_doorkey_true_vs_pseudo_counts(self.visit_counts, step=current_timestep)
                 log_small_multiples_heatmaps(self, current_timestep, grid_h=8, grid_w=8, mask_walls=True, method_name="cfn")
@@ -326,7 +358,7 @@ class DQN_CFNAgent:
 
         # update_cfn
         with torch.amp.autocast('cuda', enabled=self.use_amp):
-            pred = self.cfn(obs_tensor)
+            pred = self.cfn(obs_tensor, update_prior_stats=False)   
             cfn_loss = F.mse_loss(pred, coin_tensor)
 
         self.cfn_optimizer.zero_grad(set_to_none=True)
@@ -429,8 +461,8 @@ def main():
     env = customised_doorkey.NoDropWrapper(env)
     env = customised_doorkey.PatchGridWrapper(
         env,
-        wall_cells=[(6, 1), (7, 1)],   # the two blue cells (x,y) in interior coords
-        goal_cell=(7,0),              # the red cell (x,y) in interior coords
+        wall_cells=[(6, 1), (7, 1)],  
+        goal_cell=(7,0),             
     )
     env = FullyObsWrapper(env)
     env = RGBImgObsWrapper(env, tile_size=4)
@@ -460,20 +492,20 @@ def main():
 
     # hyperparams
     total_timesteps   = 1_000_000
-    max_episode_steps = 400
+    max_episode_steps = 200
 
     hidden_size = 256
     lr = 3e-4
     gamma = 0.99
-    batch_size = 256
+    batch_size = 32
     replay_buffer_size = 500_000
-    target_update_freq = 2_000
-    learning_starts = 5_000
+    target_update_freq = 500
+    learning_starts = 1_000
 
     cfn_coin_flip_dim = 20
     cfn_lr = 1e-4
-    cfn_replay_buffer_size = 1_000_000
-    cfn_batch_size = 512
+    cfn_replay_buffer_size = 400000
+    cfn_batch_size = 1024
     epsilon_start = 1.0
     epsilon_end   = 0.01
     epsilon_decay = 0.99998  

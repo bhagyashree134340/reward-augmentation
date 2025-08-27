@@ -1,8 +1,11 @@
+import math
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import wandb
-from minigrid.core.world_object import Door, Key
+from minigrid.core.world_object import Door, Key, Wall
+
+# ---------- helpers to locate/patch world state ----------
 
 def _find_first(env, cls):
     """Return (x,y,obj) of the first object of type cls in the grid."""
@@ -19,16 +22,13 @@ def _set_door_state(env, open_: bool):
     if loc is None:
         return
     x, y, door = loc
-    # Force state directly (faster/robust for probes)
-    door.is_open = open_
-    # Keep it unlocked to avoid weird visuals if you step
+    door.is_open = bool(open_)
     door.is_locked = False
     env.grid.set(x, y, door)
 
 def _set_inventory(env, has_key: bool):
     """Show the agent as carrying/not-carrying a key for rendering."""
     if has_key:
-        # Use the door color if present; fallback to 'yellow'
         loc = _find_first(env, Door)
         key_color = loc[2].color if loc else "yellow"
         env.carrying = Key(key_color)
@@ -39,48 +39,66 @@ def _set_inventory(env, has_key: bool):
 def _is_walkable(env, x, y):
     """Mask walls; also optional: mask cells outside inner room."""
     obj = env.grid.get(x+1, y+1)  # +1 because of outer wall border
-    # treat None (empty) or Goal/Key/door tiles as "valid to visualize"
     return True if obj is None or getattr(obj, "can_overlap", True) else False
 
 def _render_probe_obs(agent, base_env, x, y, dir_idx, has_key, door_open):
     """
     Configure env to the requested slice and return processed obs.
+    (Does NOT call env.step; no state mutation beyond visuals.)
     """
     env = base_env
-    env.reset()  # ensure a clean base; your FixedDoorKeyEnv keeps layout constant
-    # Make rendering match training resolution
+    env.reset()  # deterministic layout in FixedDoorKey
     try:
-        env.tile_size = 4  # match your RGBImgObsWrapper(tile_size=4)
+        env.tile_size = 4  # match RGBImgObsWrapper(tile_size=4)
     except Exception:
         pass
 
-    # World state slice
     _set_door_state(env, door_open)
     _set_inventory(env, has_key)
 
-    # Place agent (grid has one-cell outer wall, so shift by +1)
-    env.agent_pos = (x + 1, y + 1)
-    env.agent_dir = dir_idx  # 0-U,1-R,2:D,3:L
+    env.agent_pos = (x + 1, y + 1)  # inner grid (strip outer wall)
+    env.agent_dir = dir_idx         # 0:U,1:R,2:D,3:L
 
-    # Render exactly the same input domain you trained on
-    obs_raw = env.render()   # rgb array
-    obs = agent.process_obs(obs_raw)  # -> torch-ready tensor or np (your code)
-    return obs
+    obs_raw = env.render()
+    return agent.process_obs(obs_raw)
 
+# ---------- CFN normalized bonus (NO-UPDATE) ----------
+
+@torch.no_grad()
+def _cfn_bonus_norm_no_update(agent, obs_t) -> float:
+    """
+    Return normalized CFN bonus (z-score) for obs_t without mutating:
+      - CFN prior whitening stats
+      - RunningMeanStd (agent.int_rms)
+    """
+    pred = agent.cfn(obs_t, update_prior_stats=False)
+    b_raw = (pred.norm(dim=1) / math.sqrt(agent.coin_flip_dim)).item()
+
+    # snapshot current RMS stats
+    mu  = float(np.asarray(agent.int_rms.mean))
+    std = float(np.sqrt(np.asarray(agent.int_rms.var)) + 1e-8)
+    z = (b_raw - mu) / std
+
+    clip = getattr(agent, "int_clip", None)
+    if clip is not None:
+        z = float(np.clip(z, -clip, clip))
+    return float(z)
+
+# ---------- SMALL MULTIPLES (normalized bonuses) ----------
 
 def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=True, method_name="cfn"):
     """
-    16 heatmaps (dir x has_key x door_open) of intrinsic bonus over (x,y).
-    Logs a single 4x4 grid image to WandB.
+    16 heatmaps (dir x has_key x door_open) of *normalized* CFN bonus over (x,y).
+    Logs a single 4x4 grid image to WandB. Does NOT mutate training stats.
     """
     base_env = agent.eval_env.unwrapped
-    dirs = [0, 1, 2, 3]                 # N,E,S,W up right down left
+    dirs = [0, 1, 2, 3]       # N,E,S,W
     has_keys = [False, True]
     doors_open = [False, True]
 
     panels, titles = [], []
 
-    # Precompute wall mask once (just to hide outer walls in plots)
+    # Precompute wall mask (to hide walls in plots)
     wall_mask = np.ones((grid_h, grid_w), dtype=bool)
     if mask_walls:
         for y in range(grid_h):
@@ -96,55 +114,51 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
                         if mask_walls and not wall_mask[y, x]:
                             continue
 
-                        # Render probe obs exactly like training (but silence debug prints)
                         obs = _render_probe_obs(agent, base_env, x, y, d, hk, do)
-                        if isinstance(obs, np.ndarray):
-                            obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(agent.device) / 255.0
-                        else:
-                            obs_t = obs.float().unsqueeze(0).to(agent.device) / 255.0
+                        obs_t = (torch.from_numpy(obs).float().unsqueeze(0).to(agent.device) / 255.0
+                                 if isinstance(obs, np.ndarray)
+                                 else obs.float().unsqueeze(0).to(agent.device) / 255.0)
 
                         with torch.inference_mode():
-                            b = agent._bonus_from_obs_tensor(obs_t)
-                            if isinstance(b, torch.Tensor):
-                                H[y, x] = b.detach().flatten()[0].item()
-                            try:
-                                H[y, x] = float(b)
-                            except Exception:
-                                H[y, x] = float(np.asarray(b).flatten()[0])
+                            H[y, x] = _cfn_bonus_norm_no_update(agent, obs_t)
 
                 panels.append(H)
                 titles.append(f"dir={d} | key={int(hk)} | door_open={int(do)}")
 
-    # --- plotting (use constrained layout; no tight_layout) ---
+    # Plot with symmetric diverging scale
     fig, axes = plt.subplots(4, 4, figsize=(16, 16), constrained_layout=True)
 
-    # robust color scaling across all panels (95th percentile)
-    finite_vals = np.concatenate([P[np.isfinite(P)].ravel() for P in panels])
-    vmax = np.percentile(finite_vals, 95) if finite_vals.size else 1.0
-    vmin = 0.0
+    finite_vals = np.concatenate([P[np.isfinite(P)].ravel() for P in panels]) if panels else np.array([])
+    if finite_vals.size:
+        vmax_abs = np.percentile(np.abs(finite_vals), 95)
+    else:
+        vmax_abs = 1.0
+    vmin, vmax = -vmax_abs, vmax_abs
 
     last_im = None
     for ax, H, title in zip(axes.ravel(), panels, titles):
-        last_im = ax.imshow(H, origin="upper", vmin=vmin, vmax=vmax)
+        last_im = ax.imshow(H, origin="upper", vmin=vmin, vmax=vmax, cmap="RdBu_r")
         ax.set_title(title, fontsize=11)
         ax.set_xticks([]); ax.set_yticks([])
 
     cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), shrink=0.8)
-    cbar.set_label("intrinsic bonus", rotation=90)
-    fig.suptitle(f"CFN intrinsic bonus @ step {step}", fontsize=14)
+    cbar.set_label("normalized CFN bonus (z)", rotation=90)
+    fig.suptitle(f"CFN normalized bonus @ step {step}", fontsize=14)
 
     wandb.log({"intrinsic/small_multiples": wandb.Image(fig)}, step=step)
     plt.close(fig)
 
+# ---------- DIFFICULTY PANELS (normalized bonuses) ----------
+
 def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
                                figsize=(18, 6), percentiles=(1, 99), font=12):
-    import math, numpy as np, matplotlib.pyplot as plt, torch
     import matplotlib.patheffects as pe
-    from minigrid.core.world_object import Wall, Door, Key
 
     base = agent.eval_env.unwrapped
-    try: base.tile_size = 4
-    except Exception: pass
+    try:
+        base.tile_size = 4
+    except Exception:
+        pass
 
     H = base.grid.height - 2
     W = base.grid.width  - 2
@@ -200,15 +214,16 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
         M = np.full((H, W), np.nan, dtype=np.float32)
         for y in range(H):
             for x in range(W):
-                if isinstance(base.grid.get(x+1, y+1), Wall): continue
+                if isinstance(base.grid.get(x+1, y+1), Wall): 
+                    continue
                 vals = []
                 for d in (0,1,2,3):
-                    base.agent_pos = (x+1, y+1); base.agent_dir = d
-                    base.step(base.actions.toggle)  # refresh visuals
+                    base.agent_pos = (x+1, y+1)
+                    base.agent_dir = d
+                    # NOTE: no env.step(...) here
                     obs = agent.process_obs(base.render())
                     obs_t = torch.as_tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0) / 255.0
-                    pred = agent.cfn(obs_t, update_prior_stats=False)
-                    vals.append((pred.norm(p=2, dim=1) / math.sqrt(agent.coin_flip_dim)).item())
+                    vals.append(_cfn_bonus_norm_no_update(agent, obs_t))
                 M[y, x] = float(np.mean(vals))
         return M
 
@@ -218,16 +233,17 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
 
     maps = [bonus_map(**cond) for _, cond in panels]
 
-    # shared color scale
+    # shared symmetric color scale around 0
     all_vals = np.concatenate([m[~np.isnan(m)] for m in maps if np.any(~np.isnan(m))]) if maps else np.array([])
     if all_vals.size:
         if percentiles is None:
-            vmin, vmax = float(all_vals.min()), float(all_vals.max())
+            vmax_abs = float(np.max(np.abs(all_vals)))
         else:
             lo, hi = percentiles
-            vmin, vmax = np.percentile(all_vals, lo), np.percentile(all_vals, hi)
+            vmax_abs = float(np.percentile(np.abs(all_vals), hi))
     else:
-        vmin = vmax = None
+        vmax_abs = 1.0
+    vmin, vmax = -vmax_abs, vmax_abs
 
     # layout: 3 panels + dedicated colorbar axis
     fig = plt.figure(figsize=figsize, constrained_layout=True, dpi=120)
@@ -238,8 +254,8 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
     txt_pe = [pe.withStroke(linewidth=2, foreground="black")]
     last_im = None
     for ax, (title, _), M in zip(axs, panels, maps):
-        show = np.clip(M, vmin, vmax) if vmin is not None else M
-        last_im = ax.imshow(show, cmap="viridis", vmin=vmin, vmax=vmax,
+        show = np.clip(M, vmin, vmax)
+        last_im = ax.imshow(show, cmap="RdBu_r", vmin=vmin, vmax=vmax,
                             interpolation="nearest", origin="upper")
         ax.set_title(title, fontsize=font+2, pad=8)
         ax.set_xticks(range(W)); ax.set_yticks(range(H))
@@ -259,16 +275,15 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
     if last_im is not None:
         cb = fig.colorbar(last_im, cax=cax)
         cb.ax.tick_params(labelsize=font-2)
-        cb.set_label("CFN bonus", fontsize=font, labelpad=8)
+        cb.set_label("normalized CFN bonus (z)", fontsize=font, labelpad=8)
 
     try:
-        import wandb
         wandb.log({"heatmap/cfn_difficulty_panels": wandb.Image(fig)}, step=step)
     except Exception:
         pass
     plt.close(fig)
 
-    # optional scatter: compute distance only here
+    # optional scatter: distance vs normalized bonus (closed+key)
     if add_scatter:
         M = maps[1]  # Closed, has key
         set_world_state(door_open=False, has_key=True)
@@ -279,11 +294,10 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
             fig2 = plt.figure(figsize=(5,4), dpi=120)
             plt.scatter(xs, ys, s=14, alpha=0.85)
             plt.xlabel("Geodesic distance from start (with key)", fontsize=font)
-            plt.ylabel("CFN bonus", fontsize=font)
-            plt.title("Bonus vs distance", fontsize=font+1)
+            plt.ylabel("Normalized CFN bonus (z)", fontsize=font)
+            plt.title("Normalized bonus vs distance", fontsize=font+1)
             plt.tight_layout()
             try:
-                import wandb
                 wandb.log({"scatter/bonus_vs_distance": wandb.Image(fig2)}, step=step)
             except Exception:
                 pass

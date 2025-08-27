@@ -3,25 +3,38 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def layer_init(m, std=1.0):
-    if isinstance(m, (nn.Conv2d, nn.Linear)):
-        nn.init.orthogonal_(m.weight, gain=std)
+def conv_init(m, bias=0.01):
+    if isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
         if m.bias is not None:
-            nn.init.zeros_(m.bias)
+            nn.init.constant_(m.bias, bias)
     return m
 
+def linear_init(m, gain=1.0, bias=0.0):
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight, gain=gain)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, bias)
+    return m
+
+
 class CoinFlipNetworkCNN(nn.Module):
+    """
+    f(s) = f_hat(s) + norm(f_prior(s))
+    - Predictive head f_hat is trainable.
+    - Prior encoder/head are frozen; we keep running mean/var of f_prior.
+    """
     def __init__(self, obs_shape, coin_dim, device=None):
         super().__init__()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        c, h, w = obs_shape  
+        c, h, w = obs_shape
         self.coin_flip_dim = int(coin_dim)
 
         def make_encoder():
             return nn.Sequential(
-                layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1)),
+                conv_init(nn.Conv2d(c,   32, kernel_size=3, stride=1, padding=1)),
                 nn.ReLU(),
-                layer_init(nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)),
+                conv_init(nn.Conv2d(32,  64, kernel_size=3, stride=1, padding=1)),
                 nn.ReLU(),
                 nn.Flatten(),
             )
@@ -29,33 +42,38 @@ class CoinFlipNetworkCNN(nn.Module):
         self.net_encoder   = make_encoder()
         self.prior_encoder = make_encoder()
 
+        # feature dim from encoder
         with torch.no_grad():
             dummy = torch.zeros(1, c, h, w)
             feat_dim = self.net_encoder(dummy).shape[1]
         self.feature_dim = int(feat_dim)
 
+        # Heads: small output gains to keep magnitudes sane
         self.net_head = nn.Sequential(
-            layer_init(nn.Linear(self.feature_dim, 256)),
+            linear_init(nn.Linear(self.feature_dim, 256), gain=0.1, bias=0.0),
             nn.ReLU(),
-            layer_init(nn.Linear(256, coin_dim)),
+            linear_init(nn.Linear(256, self.coin_flip_dim), gain=0.01, bias=0.0),
         )
         self.prior_head = nn.Sequential(
-            layer_init(nn.Linear(self.feature_dim, 256)),
+            linear_init(nn.Linear(self.feature_dim, 256), gain=0.1, bias=0.0),
             nn.ReLU(),
-            layer_init(nn.Linear(256, coin_dim)),
+            linear_init(nn.Linear(256, self.coin_flip_dim), gain=0.01, bias=0.0),
         )
 
+        # Freeze the prior path
         for p in list(self.prior_encoder.parameters()) + list(self.prior_head.parameters()):
             p.requires_grad = False
 
-        self.register_buffer("prior_mean",   torch.zeros(coin_dim))
-        self.register_buffer("prior_var",    torch.ones(coin_dim) * 1e-2)  
-        self.register_buffer("prior_count",  torch.tensor(1.0))
+        # Running stats for prior whitening
+        self.register_buffer("prior_mean",   torch.zeros(self.coin_flip_dim))
+        self.register_buffer("prior_var",    torch.ones(self.coin_flip_dim))   # start with unit variance
+        self.register_buffer("prior_count",  torch.tensor(1))             # slow early drift
 
         self.to(self.device)
 
     @torch.no_grad()
-    def _update_prior_stats(self, prior_batch):
+    def _update_prior_stats(self, prior_batch: torch.Tensor):
+        """Welford-style update of running mean/var for f_prior."""
         b = prior_batch.shape[0]
         batch_mean = prior_batch.mean(dim=0)
         batch_var  = prior_batch.var(dim=0, unbiased=False).clamp_min(1e-8)
@@ -72,36 +90,35 @@ class CoinFlipNetworkCNN(nn.Module):
         self.prior_var.copy_(new_var)
         self.prior_count.copy_(total)
 
-    def forward(self, obs, update_prior_stats=True):
+    def forward(self, obs: torch.Tensor, update_prior_stats: bool = True) -> torch.Tensor:
         """
         obs: float tensor in [0,1], shape [B,C,H,W]
-        returns: combined output f(s) in R^d (B,d)
+        returns f(s) in R^d, shape [B,d]
         """
         x = obs
         net_feat   = self.net_encoder(x)
         prior_feat = self.prior_encoder(x)
 
-        pred  = self.net_head(net_feat)             
-        prior = self.prior_head(prior_feat)         
+        pred  = self.net_head(net_feat)         # trainable component f_hat(s)
+        prior = self.prior_head(prior_feat)     # frozen random prior
 
+        # 1) Normalize using *stored* stats (Alg. step: compute B(s_t))
+        # Tiny floor keeps whitening stable if a variance dimension collapses.
+        std = torch.sqrt(self.prior_var + 1e-8).clamp_min(1e-8)
+        prior_white = (prior - self.prior_mean) / std
+
+        # 2) Now update stats with current f_prior(s) (Alg. step: update μ, σ^2)
         if update_prior_stats:
             self._update_prior_stats(prior.detach())
 
-        std = torch.sqrt(self.prior_var + 1e-8)
-        prior_white = (prior - self.prior_mean) / std
-
-        f = pred + prior_white
-        return f
+        return pred + prior_white
 
     @torch.no_grad()
-    def compute_squared_output_norm(self, obs):
-        """
-        ||f(s)||^2 for B states (expects obs already on device and in [0,1])
-        """
-        f = self.forward(obs, update_prior_stats=False)  
+    def compute_squared_output_norm(self, obs: torch.Tensor) -> torch.Tensor:
+        """Return ||f(s)||^2 for a batch; obs already on device and in [0,1]."""
+        f = self.forward(obs, update_prior_stats=False)
         return (f.pow(2).sum(dim=1)).clamp_min(1e-12)
-
-
+    
 
 class CoinFlipNetwork(nn.Module):
     def __init__(self, state_dim, coin_dim, hidden_dim=128, device=None):
