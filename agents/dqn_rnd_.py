@@ -1,6 +1,7 @@
 import sys
 import os
 from matplotlib import pyplot as plt
+from utils.heatmaps_utils import log_small_multiples_heatmaps, plot_cfn_difficulty_panels
 from utils.evaluate import evaluate_dqn
 from utils.validate import validate_dqn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -181,13 +182,27 @@ class DQN_RNDAgent:
             obs_tensor = obs_tensor / 255.0
         return obs_tensor
 
+    # Replace your current act() with this minimal version
     def act(self, obs, epsilon):
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
-        obs_tensor = self.obs_to_float_tensor(obs).unsqueeze(0)
+
+        obs_tensor = self.obs_to_float_tensor(obs)  # could be (C,H,W) or (1,C,H,W)
+
+        # ✅ Only add batch dim if needed
+        if obs_tensor.dim() == 3:
+            obs_tensor = obs_tensor.unsqueeze(0)
+        elif obs_tensor.dim() == 4:
+            # keep as-is; if someone passes a larger batch, take the first item
+            if obs_tensor.shape[0] != 1:
+                obs_tensor = obs_tensor[:1]
+        else:
+            raise ValueError(f"act() expected 3D or 4D obs, got shape {tuple(obs_tensor.shape)}")
+
         with torch.no_grad():
             q_values = self.q_net(obs_tensor)
-        return q_values.argmax().item()
+            return int(q_values.argmax(dim=1).item())
+
 
     def compute_intrinsic_reward(self, obs_tensor):
         if len(obs_tensor.shape) == 3:
@@ -346,6 +361,8 @@ class DQN_RNDAgent:
 
             if current_timestep % 100_000 == 0 and current_timestep > 0:
                 self.plot_intrinsic_vs_true_bonus_heatmap_minigrid_rnd(current_timestep)
+                log_small_multiples_heatmaps(self, current_timestep, grid_h=8, grid_w=8, mask_walls=True, method_name="rnd")
+                plot_cfn_difficulty_panels(self, step=current_timestep, show_counts=True, add_scatter=True, method_name="rnd")
 
     def update_rnd(self, batch):
         """Update RND predictor network"""

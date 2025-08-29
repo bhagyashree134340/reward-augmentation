@@ -38,7 +38,7 @@ class DDQN(nn.Module):
             )
             
         else:
-            state_size = obs_shape[0] if isinstance(obs_shape, tuple) else obs_shape
+            state_size = obs_shape
             self.fc_layers = nn.Sequential(
                 layer_init(nn.Linear(state_size, hidden_size)),
                 nn.ReLU(),
@@ -57,7 +57,7 @@ class DDQN(nn.Module):
                 x = x / 255.0
                 
             x = self.conv_layers(x)
-            x = x.view(x.size(0), -1)  # This is now redundant since we use Flatten()
+            x = x.view(x.size(0), -1)  
             return self.fc_layers(x)
         else:
             return self.fc_layers(x)
