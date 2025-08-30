@@ -20,6 +20,7 @@ import customised_doorkey
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 log = logging.getLogger(__name__)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 class DQN_CFNAgent:
     def __init__(self, env, eval_env, env_name, dqn_cfg, cfn_cfg):
@@ -63,12 +64,16 @@ class DQN_CFNAgent:
 
         self.q_net = DDQN(self.state_dim, self.act_dim, dqn_cfg.hidden_size, is_cnn=False).to(self.device)
         self.target_q_net = DDQN(self.state_dim, self.act_dim, dqn_cfg.hidden_size, is_cnn=False).to(self.device)
+        self.q_net = DDQN(self.state_dim, self.act_dim, dqn_cfg.hidden_size, is_cnn=False).to(self.device)
+        self.target_q_net = DDQN(self.state_dim, self.act_dim, dqn_cfg.hidden_size, is_cnn=False).to(self.device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=1.25e-4, eps=1.5e-4)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=1.25e-4, eps=1.5e-4)
 
         self.gamma = dqn_cfg.gamma
         self.batch_size = dqn_cfg.batch_size
         self.target_update_freq = dqn_cfg.target_update_freq
+        self.learning_starts = dqn_cfg.learning_starts
         self.learning_starts = dqn_cfg.learning_starts
 
         self.replay_buffer = ReplayBuffer(
@@ -87,7 +92,11 @@ class DQN_CFNAgent:
         self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
         self.cfn = CoinFlipNetwork(state_dim=self.state_dim, coin_dim=self.coin_flip_dim, device=self.device).to(self.device)
         self.cfn_optimizer = optim.RMSprop(self.cfn.parameters(), lr=1e-4, momentum=0.9, eps=1e-4, weight_decay=1e-5)
+        self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
+        self.cfn = CoinFlipNetwork(state_dim=self.state_dim, coin_dim=self.coin_flip_dim, device=self.device).to(self.device)
+        self.cfn_optimizer = optim.RMSprop(self.cfn.parameters(), lr=1e-4, momentum=0.9, eps=1e-4, weight_decay=1e-5)
         self.cfn_buffer = CFNReplayBufferWrapper(
+            size=cfn_cfg.cfn_replay_buffer_size, obs_shape=self.state_dim, coin_flip_dim=self.coin_flip_dim, alpha=0.5
             size=cfn_cfg.cfn_replay_buffer_size, obs_shape=self.state_dim, coin_flip_dim=self.coin_flip_dim, alpha=0.5
         )
         self.lambda_bonus = cfn_cfg.cfn_intrinsic_scale
@@ -171,13 +180,17 @@ class DQN_CFNAgent:
         self.visit_counts[(y - 1), (x - 1)] += 1
 
     def act(self, obs_tensor, epsilon):
+    def act(self, obs_tensor, epsilon):
         if np.random.rand() < epsilon:
             return self.env.action_space.sample()
         with torch.no_grad():
             return int(self.q_net(obs_tensor).argmax().item())
+            return int(self.q_net(obs_tensor).argmax().item())
 
     def train(self, total_timesteps, max_episode_steps):
         current_timestep = 0
+        episode_return_aug, episode_step, episode_num = 0.0, 0, 0
+
         episode_return_aug, episode_step, episode_num = 0.0, 0, 0
 
         obs_raw, _ = self.env.reset()
@@ -185,6 +198,13 @@ class DQN_CFNAgent:
         self.increment_visit_counts()
 
         while current_timestep < total_timesteps:
+            frac = min(1.0, current_timestep / self.eps_decay_steps)
+            self.epsilon = self.eps_start + frac * (self.eps_end - self.eps_start)
+
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            action = self.act(obs_tensor, self.epsilon)
+
+            next_obs_raw, reward, terminated, truncated, _ = self.env.step(action)
             frac = min(1.0, current_timestep / self.eps_decay_steps)
             self.epsilon = self.eps_start + frac * (self.eps_end - self.eps_start)
 
@@ -228,7 +248,16 @@ class DQN_CFNAgent:
 
             if self.replay_buffer.get_stored_size() >= max(self.batch_size, self.learning_starts):
                 self.update_q(self.replay_buffer.sample(self.batch_size), current_timestep)
+            if self.replay_buffer.get_stored_size() >= max(self.batch_size, self.learning_starts):
+                self.update_q(self.replay_buffer.sample(self.batch_size), current_timestep)
 
+            if self.cfn_buffer.get_stored_size() >= self.cfn_batch_size:
+                obs_bc, coin_bc, idx = self.cfn_buffer.sample_with_indices(self.cfn_batch_size)
+                self.update_cfn(obs_bc, coin_bc, current_timestep)
+                self.cfn_buffer.update_priorities(idx, obs_bc, self.cfn, self.coin_flip_dim)
+
+            if current_timestep % self.target_update_freq == 0:
+                self.target_q_net.load_state_dict(self.q_net.state_dict())
             if self.cfn_buffer.get_stored_size() >= self.cfn_batch_size:
                 obs_bc, coin_bc, idx = self.cfn_buffer.sample_with_indices(self.cfn_batch_size)
                 self.update_cfn(obs_bc, coin_bc, current_timestep)
@@ -246,9 +275,11 @@ class DQN_CFNAgent:
             if done or episode_step >= max_episode_steps:
                 wandb.log({
                     "charts/episodic_return": episode_return_aug,
+                    "charts/episodic_return": episode_return_aug,
                     "charts/episodic_length": episode_step,
                     "charts/episode_num": episode_num
                 }, step=current_timestep)
+                log.info(f"Episode {episode_num} | Steps: {episode_step} | AugReturn: {episode_return_aug:.2f} | ε: {self.epsilon:.3f} | T: {current_timestep}")
                 log.info(f"Episode {episode_num} | Steps: {episode_step} | AugReturn: {episode_return_aug:.2f} | ε: {self.epsilon:.3f} | T: {current_timestep}")
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
@@ -259,7 +290,16 @@ class DQN_CFNAgent:
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=0.0)
             if current_timestep % 5000 == 0 or current_timestep == 10:
                 plot_intrinsic_three_panels(self, current_timestep)
+                episode_return_aug, episode_step, episode_num = 0.0, 0, episode_num + 1
 
+            if current_timestep % 10_000 == 0 and current_timestep > 0:
+                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=0.0)
+            if current_timestep % 5000 == 0 or current_timestep == 10:
+                plot_intrinsic_three_panels(self, current_timestep)
+
+    def update_q(self, batch, step):
+        obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device)
+        next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device)
     def update_q(self, batch, step):
         obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device)
         next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device)
@@ -291,6 +331,10 @@ class DQN_CFNAgent:
 
         if self.step_count % 10000 == 0:
             wandb.log({
+                "training/dqn_loss": float(loss.item()),
+                "training/q_values_mean": float(q_val.mean().item()),
+                "training/target_mean": float(target.mean().item()),
+            }, step=step)
                 "training/dqn_loss": float(loss.item()),
                 "training/q_values_mean": float(q_val.mean().item()),
                 "training/target_mean": float(target.mean().item()),
@@ -464,6 +508,7 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval-flat", num_episodes=10,
 
 def main():
     wandb.init(project="dqn", name="cfn-paper-faithful")
+    wandb.init(project="dqn", name="cfn-paper-faithful")
 
     env = gym.make(
         "Fixed-DoorKey-v0", size=10,
@@ -519,3 +564,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

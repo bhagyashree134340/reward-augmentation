@@ -1,3 +1,4 @@
+# utils/heatmaps_utils.py
 import math
 import numpy as np
 import torch
@@ -62,35 +63,70 @@ def _render_probe_obs(agent, base_env, x, y, dir_idx, has_key, door_open):
     obs_raw = env.render()
     return agent.process_obs(obs_raw)
 
-# ---------- CFN normalized bonus (NO-UPDATE) ----------
+def _to_obs_tensor(obs, device):
+    if isinstance(obs, np.ndarray):
+        t = torch.from_numpy(obs).float().unsqueeze(0).to(device)
+    else:
+        t = obs.float().unsqueeze(0).to(device)
+    if t.max() > 1.0:
+        t = t / 255.0
+    return t
+
 
 @torch.no_grad()
-def _cfn_bonus_norm_no_update(agent, obs_t) -> float:
+def _intrinsic_bonus_norm_no_update(agent, obs_t, method: str) -> float:
     """
-    Return normalized CFN bonus (z-score) for obs_t without mutating:
-      - CFN prior whitening stats
-      - RunningMeanStd (agent.int_rms)
+    Return a *normalized* intrinsic bonus for obs_t without mutating any training state.
+
+    For "rnd":
+      - whiten with agent.obs_rms (mean/var snapshot), clip to [-5,5]
+      - raw bonus = 0.5 * sum((pred - target)^2)
+      - normalized by reward_std = sqrt(agent.reward_rms.var + 1e-8)
+
+    For "cfn":
+      - raw bonus = ||f_phi(o)|| / sqrt(coin_dim)
+      - z-normalize using agent.int_rms (mean/var snapshot)
     """
-    pred = agent.cfn(obs_t, update_prior_stats=False)
-    b_raw = (pred.norm(dim=1) / math.sqrt(agent.coin_flip_dim)).item()
+    method = method.lower()
 
-    # snapshot current RMS stats
-    mu  = float(np.asarray(agent.int_rms.mean))
-    std = float(np.sqrt(np.asarray(agent.int_rms.var)) + 1e-8)
-    z = (b_raw - mu) / std
+    if method == "rnd":
+        # whiten + clip exactly like in your compute_intrinsic_reward (but read-only)
+        obs_mean = torch.from_numpy(agent.obs_rms.mean).float().to(agent.device)
+        obs_var  = torch.from_numpy(agent.obs_rms.var).float().to(agent.device)
+        norm_obs = (obs_t - obs_mean) / torch.sqrt(obs_var + 1e-8)
+        norm_obs = torch.clamp(norm_obs, -5.0, 5.0)
 
-    clip = getattr(agent, "int_clip", None)
-    if clip is not None:
-        z = float(np.clip(z, -clip, clip))
-    return float(z)
+        # predictor/target outputs
+        pred, target = agent.rnd(norm_obs)
+        b_raw = 0.5 * ((pred - target) ** 2).sum(dim=1).item()
+
+        # normalize by running std of discounted intrinsic returns (your pipeline)
+        reward_std = float(np.sqrt(np.asarray(agent.reward_rms.var) + 1e-8))
+        b_norm = b_raw / (reward_std if reward_std > 0 else 1.0)
+
+    elif method == "cfn":
+        # Expect agent.cfn API similar to your CFN agent
+        pred = agent.cfn(obs_t, update_prior_stats=False)
+        coin_dim = getattr(agent, "coin_flip_dim", pred.shape[1])
+        b_raw = (pred.norm(dim=1) / math.sqrt(float(coin_dim))).item()
+
+        mu  = float(np.asarray(agent.int_rms.mean))
+        std = float(np.sqrt(np.asarray(agent.int_rms.var)) + 1e-8)
+        b_norm = (b_raw - mu) / (std if std > 0 else 1.0)
+
+    else:
+        raise ValueError(f"Unknown method '{method}'. Use 'rnd' or 'cfn'.")
+
+    return float(b_norm)
 
 # ---------- SMALL MULTIPLES (normalized bonuses) ----------
 
-def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=True, method_name="cfn"):
+def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=True, method_name="rnd"):
     """
-    16 heatmaps (dir x has_key x door_open) of *normalized* CFN bonus over (x,y).
-    Logs a single 4x4 grid image to WandB. Does NOT mutate training stats.
+    16 heatmaps (dir x has_key x door_open) of *normalized* intrinsic bonus over (x,y).
+    Works for RND and CFN. Does NOT mutate training stats.
     """
+    method = method_name.lower()
     base_env = agent.eval_env.unwrapped
     dirs = [0, 1, 2, 3]       # N,E,S,W
     has_keys = [False, True]
@@ -99,11 +135,11 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
     panels, titles = [], []
 
     # Precompute wall mask (to hide walls in plots)
-    wall_mask = np.ones((grid_h, grid_w), dtype=bool)
-    if mask_walls:
-        for y in range(grid_h):
-            for x in range(grid_w):
-                wall_mask[y, x] = _is_walkable(base_env, x, y)
+    # wall_mask = np.ones((grid_h, grid_w), dtype=bool)
+    # if mask_walls:
+    #     for y in range(grid_h):
+    #         for x in range(grid_w):
+    #             wall_mask[y, x] = _is_walkable(base_env, x, y)
 
     for d in dirs:
         for hk in has_keys:
@@ -111,16 +147,14 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
                 H = np.full((grid_h, grid_w), np.nan, dtype=np.float32)
                 for y in range(grid_h):
                     for x in range(grid_w):
-                        if mask_walls and not wall_mask[y, x]:
-                            continue
+                        # if mask_walls and not wall_mask[y, x]:
+                        #     continue
 
                         obs = _render_probe_obs(agent, base_env, x, y, d, hk, do)
-                        obs_t = (torch.from_numpy(obs).float().unsqueeze(0).to(agent.device) / 255.0
-                                 if isinstance(obs, np.ndarray)
-                                 else obs.float().unsqueeze(0).to(agent.device) / 255.0)
+                        obs_t = _to_obs_tensor(obs, agent.device)
 
                         with torch.inference_mode():
-                            H[y, x] = _cfn_bonus_norm_no_update(agent, obs_t)
+                            H[y, x] = _intrinsic_bonus_norm_no_update(agent, obs_t, method)
 
                 panels.append(H)
                 titles.append(f"dir={d} | key={int(hk)} | door_open={int(do)}")
@@ -129,10 +163,7 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
     fig, axes = plt.subplots(4, 4, figsize=(16, 16), constrained_layout=True)
 
     finite_vals = np.concatenate([P[np.isfinite(P)].ravel() for P in panels]) if panels else np.array([])
-    if finite_vals.size:
-        vmax_abs = np.percentile(np.abs(finite_vals), 95)
-    else:
-        vmax_abs = 1.0
+    vmax_abs = np.percentile(np.abs(finite_vals), 95) if finite_vals.size else 1.0
     vmin, vmax = -vmax_abs, vmax_abs
 
     last_im = None
@@ -142,17 +173,24 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
         ax.set_xticks([]); ax.set_yticks([])
 
     cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), shrink=0.8)
-    cbar.set_label("normalized CFN bonus (z)", rotation=90)
-    fig.suptitle(f"CFN normalized bonus @ step {step}", fontsize=14)
+    cbar.set_label("normalized intrinsic bonus", rotation=90)
+    fig.suptitle(f"{method.upper()} normalized bonus @ step {step}", fontsize=14)
 
-    wandb.log({"intrinsic/small_multiples": wandb.Image(fig)}, step=step)
+    wandb.log({f"intrinsic/{method}_small_multiples": wandb.Image(fig)}, step=step)
     plt.close(fig)
 
-# ---------- DIFFICULTY PANELS (normalized bonuses) ----------
 
 def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
-                               figsize=(18, 6), percentiles=(1, 99), font=12):
+                               figsize=(18, 6), percentiles=(1, 99), font=12,
+                               method_name="rnd"):
+    """
+    Generalized for RND and CFN. Three panels:
+      (A) door closed, no key
+      (B) door closed, has key
+      (C) door open
+    """
     import matplotlib.patheffects as pe
+    method = method_name.lower()
 
     base = agent.eval_env.unwrapped
     try:
@@ -214,7 +252,7 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
         M = np.full((H, W), np.nan, dtype=np.float32)
         for y in range(H):
             for x in range(W):
-                if isinstance(base.grid.get(x+1, y+1), Wall): 
+                if isinstance(base.grid.get(x+1, y+1), Wall):
                     continue
                 vals = []
                 for d in (0,1,2,3):
@@ -222,8 +260,8 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
                     base.agent_dir = d
                     # NOTE: no env.step(...) here
                     obs = agent.process_obs(base.render())
-                    obs_t = torch.as_tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0) / 255.0
-                    vals.append(_cfn_bonus_norm_no_update(agent, obs_t))
+                    obs_t = _to_obs_tensor(obs, agent.device)
+                    vals.append(_intrinsic_bonus_norm_no_update(agent, obs_t, method))
                 M[y, x] = float(np.mean(vals))
         return M
 
@@ -266,7 +304,7 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
         if key_pos:  ax.text(*key_pos,  "K", ha="center", va="center", fontsize=font, weight="bold", color="white", path_effects=txt_pe)
         if goal_pos: ax.text(*goal_pos, "G", ha="center", va="center", fontsize=font, weight="bold", color="white", path_effects=txt_pe)
         # counts
-        if show_counts and hasattr(agent, "visit_counts") and agent.visit_counts.shape == (H, W):
+        if show_counts and hasattr(agent, "visit_counts") and getattr(agent.visit_counts, "shape", None) == (H, W):
             for yy in range(H):
                 for xx in range(W):
                     ax.text(xx, yy, str(int(agent.visit_counts[yy, xx])),
@@ -275,10 +313,10 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
     if last_im is not None:
         cb = fig.colorbar(last_im, cax=cax)
         cb.ax.tick_params(labelsize=font-2)
-        cb.set_label("normalized CFN bonus (z)", fontsize=font, labelpad=8)
+        cb.set_label("normalized intrinsic bonus", fontsize=font, labelpad=8)
 
     try:
-        wandb.log({"heatmap/cfn_difficulty_panels": wandb.Image(fig)}, step=step)
+        wandb.log({f"heatmap/{method}_difficulty_panels": wandb.Image(fig)}, step=step)
     except Exception:
         pass
     plt.close(fig)
@@ -294,11 +332,11 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
             fig2 = plt.figure(figsize=(5,4), dpi=120)
             plt.scatter(xs, ys, s=14, alpha=0.85)
             plt.xlabel("Geodesic distance from start (with key)", fontsize=font)
-            plt.ylabel("Normalized CFN bonus (z)", fontsize=font)
-            plt.title("Normalized bonus vs distance", fontsize=font+1)
+            plt.ylabel("Normalized intrinsic bonus", fontsize=font)
+            plt.title(f"{method.upper()}: bonus vs distance", fontsize=font+1)
             plt.tight_layout()
             try:
-                wandb.log({"scatter/bonus_vs_distance": wandb.Image(fig2)}, step=step)
+                wandb.log({f"scatter/{method}_bonus_vs_distance": wandb.Image(fig2)}, step=step)
             except Exception:
                 pass
             plt.close(fig2)

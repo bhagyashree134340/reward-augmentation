@@ -42,16 +42,7 @@ def get_coin_flips(coin_flip_dim: int, device=None) -> torch.Tensor:
 
 
 def compute_intrinsic_reward(coin_flip_d: int, cfn_norm: Tensor, device=None) -> Tensor:
-    """
-    Computes intrinsic reward using coin-flip vector dimensionality and its norm.
-
-    Args:
-        coin_flip_d (int): Dimensionality of the coin-flip vector.
-        cfn_norm (Tensor): Precomputed squared L2 norm of the vector.
-
-    Returns:
-        Tensor: Intrinsic reward value.
-    """
+    
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     return torch.sqrt(cfn_norm / coin_flip_d).to(device)

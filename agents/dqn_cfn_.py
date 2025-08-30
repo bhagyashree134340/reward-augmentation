@@ -26,7 +26,7 @@ import customised_doorkey
 from networks.ddqn import DDQN
 from CFN.CFN import CoinFlipNetworkCNN
 from CFN.cfn_buffer import CFNReplayBufferWrapper
-from CFN.priority_util import get_coin_flips
+from CFN.priority_util import compute_intrinsic_reward, get_coin_flips
 
 from utils.validate import validate_dqn
 from utils.evaluate import evaluate_dqn
@@ -125,8 +125,8 @@ class DQN_CFNAgent:
 
         # epsilon-greedy
         self.eps_start = 1.0
-        self.eps_end = 0.001
-        self.eps_decay_steps = 1_000
+        self.eps_end = 0.05
+        self.eps_decay_steps = 200_000
         self.eval_epsilon = 0.001
 
         self.epsilon = self.eps_start
@@ -153,15 +153,20 @@ class DQN_CFNAgent:
     @torch.no_grad()
     def _bonus_from_obs_tensor(self, obs_tensor):
 
-        pred = self.cfn(obs_tensor, update_prior_stats=True)
-        bonus_raw = (pred.norm(dim=1) / math.sqrt(self.coin_flip_dim)).item()
+        bonus_raw = compute_intrinsic_reward(
+            self.coin_flip_dim,
+            self.cfn.compute_squared_output_norm(obs_tensor)
+        )
 
-        
+        bonus_raw = float(bonus_raw.detach().cpu().item())            
+
         mu  = float(np.asarray(self.int_rms.mean))
         std = float(np.sqrt(np.asarray(self.int_rms.var)) + 1e-8)
         b_norm = (bonus_raw - mu) / std
 
         self.int_rms.update(np.array([bonus_raw], dtype=np.float32))
+
+        _ = self.cfn(obs_tensor, update_prior_stats=True)
 
         return float(b_norm)
 
@@ -189,7 +194,7 @@ class DQN_CFNAgent:
             frac = min(1.0, current_timestep / self.eps_decay_steps)
             self.epsilon = self.eps_start + frac * (self.eps_end - self.eps_start)
 
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
+            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0) / 255.0
 
 
             # act
@@ -306,17 +311,17 @@ class DQN_CFNAgent:
             # periodic eval and heatmap
             if current_timestep % 50_000 == 0 and current_timestep > 0:
                 validate_dqn(self, current_timestep, save_dir="checkpoints_cfn")
-                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=0.0)
+                evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=self.eval_epsilon)
             if current_timestep % 100_000 == 0 or current_timestep == 10:
                 self.log_doorkey_true_vs_pseudo_counts(self.visit_counts, step=current_timestep)
                 log_small_multiples_heatmaps(self, current_timestep, grid_h=8, grid_w=8, mask_walls=True, method_name="cfn")
-                plot_cfn_difficulty_panels(self, step=current_timestep, show_counts=True, add_scatter=True)
+                plot_cfn_difficulty_panels(self, step=current_timestep, show_counts=True, add_scatter=True, method_name="cfn")
 
 
     # q update
     def update_q(self, batch, current_timestep):
-        obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
-        next_obs = torch.tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
+        obs      = torch.as_tensor(batch["obs"],      dtype=torch.float32, device=self.device) / 255.0
+        next_obs = torch.as_tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
         act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
         rew = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)
         intr = torch.from_numpy(batch["intr"].squeeze(-1)).float().to(self.device)
@@ -353,8 +358,9 @@ class DQN_CFNAgent:
 
     # cfn update
     def update_cfn(self, obs_batch, coin_flip_batch, current_timestep):
-        obs_tensor = torch.tensor(obs_batch, dtype=torch.float32, device=self.device) / 255.0
-        coin_tensor = torch.tensor(coin_flip_batch, dtype=torch.float32, device=self.device)
+        obs_tensor  = torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device) / 255.0
+        coin_tensor = torch.as_tensor(coin_flip_batch, dtype=torch.float32, device=self.device)
+
 
         # update_cfn
         with torch.amp.autocast('cuda', enabled=self.use_amp):
@@ -455,7 +461,7 @@ def main():
         agent_start_pos=(1, 1),
         agent_start_dir=0,
         disable_env_checker=True,
-        max_episode_steps=400,
+        max_episode_steps=300,
         render_mode="rgb_array",
     )
     env = customised_doorkey.NoDropWrapper(env)
@@ -477,7 +483,7 @@ def main():
         agent_start_pos=(1, 1),
         agent_start_dir=0,
         disable_env_checker=True,
-        max_episode_steps=400,
+        max_episode_steps=300,
         render_mode="rgb_array",
     )
     eval_env = customised_doorkey.NoDropWrapper(eval_env)
@@ -505,7 +511,7 @@ def main():
     cfn_coin_flip_dim = 20
     cfn_lr = 1e-4
     cfn_replay_buffer_size = 400000
-    cfn_batch_size = 1024
+    cfn_batch_size = 512
     epsilon_start = 1.0
     epsilon_end   = 0.01
     epsilon_decay = 0.99998  
