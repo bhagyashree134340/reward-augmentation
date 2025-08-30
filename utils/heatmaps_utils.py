@@ -137,7 +137,7 @@ def log_small_multiples_heatmaps(agent, step, grid_h=8, grid_w=8, mask_walls=Tru
 
     last_im = None
     for ax, H, title in zip(axes.ravel(), panels, titles):
-        last_im = ax.imshow(H, origin="upper", vmin=vmin, vmax=vmax, cmap="RdBu_r")
+        last_im = ax.imshow(H, origin="upper", vmin=vmin, vmax=vmax, cmap="viridis")
         ax.set_title(title, fontsize=11)
         ax.set_xticks([]); ax.set_yticks([])
 
@@ -255,7 +255,7 @@ def plot_cfn_difficulty_panels(agent, step, show_counts=True, add_scatter=True,
     last_im = None
     for ax, (title, _), M in zip(axs, panels, maps):
         show = np.clip(M, vmin, vmax)
-        last_im = ax.imshow(show, cmap="RdBu_r", vmin=vmin, vmax=vmax,
+        last_im = ax.imshow(show, cmap="viridis", vmin=vmin, vmax=vmax,
                             interpolation="nearest", origin="upper")
         ax.set_title(title, fontsize=font+2, pad=8)
         ax.set_xticks(range(W)); ax.set_yticks(range(H))

@@ -31,9 +31,22 @@ class PatchGridWrapper(Wrapper):
         self.use_env_coords = use_env_coords
 
     def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
+        _, info = self.env.reset(**kwargs)
         self._apply_patch()
+
+        base_env = self.env.unwrapped
+        if hasattr(base_env, "gen_obs"):
+            obs = base_env.gen_obs()
+        elif hasattr(base_env, "render_obs"):
+            obs = base_env.render_obs()
+        elif hasattr(base_env, "render"):
+            obs = base_env.render()
+        else:
+            raise RuntimeError("Cannot re-generate observation after patch.")
+
         return obs, info
+
+
 
     def _to_env(self, x, y):
         return (x, y) if self.use_env_coords else (x + 1, y + 1)
@@ -56,7 +69,7 @@ class NoDropWrapper(Wrapper):
     def __init__(self, env):
         super().__init__(env)
         self._keep = [Actions.left, Actions.right, Actions.forward,
-                      Actions.pickup, Actions.toggle, Actions.done]
+                      Actions.pickup, Actions.toggle] #removed the done and drop actions 
         self.action_space = spaces.Discrete(len(self._keep))
 
     def step(self, a):

@@ -145,7 +145,7 @@ class CoinFlipNetwork(nn.Module):
             param.requires_grad = False
 
         self.register_buffer("prior_mean", torch.zeros(coin_dim))
-        self.register_buffer("prior_var", torch.ones(coin_dim) * 0.01)
+        self.register_buffer("prior_var", torch.ones(coin_dim))
         self.register_buffer("prior_count", torch.tensor(1.0))
 
         self.coin_flip_dim = coin_dim
@@ -159,14 +159,16 @@ class CoinFlipNetwork(nn.Module):
         with torch.no_grad():
             prior_out = self.prior(state)
 
-            if update_prior_stats:
-                self.update_prior_stats(prior_out)
-
+            # normalizing before updating stats. 
             std = torch.sqrt(self.prior_var + 1e-6)
             normalized_prior = (prior_out - self.prior_mean) / std
             normalized_prior = normalized_prior.detach()
 
+            if update_prior_stats:
+                self.update_prior_stats(prior_out)
+
         return net_output + normalized_prior
+
 
     def update_prior_stats(self, prior_out):
         with torch.no_grad():
