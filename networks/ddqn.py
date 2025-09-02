@@ -44,7 +44,7 @@ class DDQN(nn.Module):
                 nn.ReLU(),
                 layer_init(nn.Linear(hidden_size, hidden_size)),
                 nn.ReLU(),
-                layer_init(nn.Linear(hidden_size, action_size))
+                layer_init(nn.Linear(hidden_size, action_size), std=1e-2)
             )
         
         self.is_cnn = is_cnn
