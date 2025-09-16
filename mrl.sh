@@ -3,9 +3,9 @@
 #SBATCH --gres=gpu:1                             
 #SBATCH -t 0-20:00                  
 #SBATCH -c 1                        
-#SBATCH -o log/cfn.%j.out         # STDOUT log (job ID in filename)
-#SBATCH -e log/cfn.%j.err         # STDERR log (job ID in filename)
-#SBATCH -J cfn-dqn           # Job name
+#SBATCH -o log/mrl.%j.out         # STDOUT log (job ID in filename)
+#SBATCH -e log/mrl.%j.err         # STDERR log (job ID in filename)
+#SBATCH -J mrl-dqn           # Job name
 
 echo "Working dir: $PWD"
 echo "Started at $(date)"
@@ -25,7 +25,7 @@ start=`date +%s`
 echo "Running training script..."
 cd /work/dlclarge2/raneb-project/reward-augmentation
 export PYTHONPATH=$PWD
-python agents/dqn_cfn.py
+python agents/mrl-dqn.py
 
 end=`date +%s`
 runtime=$((end-start))

@@ -1,158 +1,190 @@
-import time
 import torch
 import torch.nn.functional as F
 import wandb
 
-from agents import customised_doorkey
-from minigrid.wrappers import FullyObsWrapper
-import gymnasium as gym
-
 from agents.dqn_rnd import DQN_RNDAgent
 
 class RND_MRL_DQN_Agent(DQN_RNDAgent):
-    def __init__(self, env, eval_env, dqn_cfg, rnd_cfg, env_name):
+    """
+    RND + Munchausen DQN
+    - Reuses RND training/normalization/replay from DQN_RNDAgent
+    - Only overrides the DQN update to use Munchausen reward shaping and soft backup
+    """
+    def __init__(
+        self,
+        env,
+        eval_env,
+        dqn_cfg,
+        rnd_cfg,
+        env_name,
+        tau: float = 0.06,
+        alpha_m: float = 0.3,
+        lo: float = -1.0,
+        ext_coef: float = None,   # if None, keep rnd_cfg.extrinsic_coef
+        int_coef: float = None,   # if None, keep rnd_cfg.intrinsic_coef
+        grad_clip: float = 10.0,
+    ):
         super().__init__(env=env, eval_env=eval_env, dqn_cfg=dqn_cfg, rnd_cfg=rnd_cfg, env_name=env_name)
-        # Munchausen hyperparams
-        self.tau = dqn_cfg.tau
-        self.alpha_m = dqn_cfg.alpha_m
-        self.lo = dqn_cfg.lo
+        self.tau = float(tau)
+        self.alpha_m = float(alpha_m)
+        self.lo = float(lo)
+        self.grad_clip = float(grad_clip)
 
-    @torch.no_grad()
-    def _soft_value_next(self, q_next_target: torch.Tensor) -> torch.Tensor:
-        # V_soft(s') = sum_a pi(a|s') * [ Q(s',a) - tau * log pi(a|s') ]
-        log_pi_next = F.log_softmax(q_next_target / self.tau, dim=1)
-        pi_next = torch.exp(log_pi_next)
-        v_soft = torch.sum(pi_next * (q_next_target - self.tau * log_pi_next), dim=1)
-        return v_soft
+        # Allow overriding coef at agent level without changing rnd_cfg
+        if ext_coef is not None:
+            self.extrinsic_coef = float(ext_coef)
+        if int_coef is not None:
+            self.intrinsic_coef = float(int_coef)
 
     def update_dqn(self, batch):
-        # --- get tensors in your vector space ---
-        obs      = self.obs_to_float_tensor(batch["obs"])
-        next_obs = self.obs_to_float_tensor(batch["next_obs"])
-        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)
-        ext_rew  = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(self.device)
-        int_rew  = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(self.device)
-        term     = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)
-        timeout  = torch.from_numpy(batch["timeout"].squeeze(-1)).float().to(self.device)
+        """
+        Munchausen Q-update:
+          r̃(s,a) = c_ext*R_ext + c_int*R_int + α * clip(log π(a|s), lo, 0)
+          target = r̃ + γ * Σ_a' π(a'|s') [ Q_tgt(s',a') - τ log π(a'|s') ]   (no bootstrap on terminal)
+        """
+        device = self.device
+        # ---- unpack batch ----
+        obs      = self.obs_to_float_tensor(batch["obs"])                  # (B, D)
+        next_obs = self.obs_to_float_tensor(batch["next_obs"])             # (B, D)
+        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(device)         # (B,)
+        ext      = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(device)    # (B,)
+        intr_n   = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(device)    # (B,)
+        term     = torch.from_numpy(batch["term"].squeeze(-1)).float().to(device)       # (B,)
+        # timeout  = torch.from_numpy(batch["timeout"].squeeze(-1)).float().to(device)  # not used in bootstrap
 
-        total_rew = self.extrinsic_coef * ext_rew + self.intrinsic_coef * int_rew
+        # ---- base reward (your existing scaling) ----
+        base_reward = self.extrinsic_coef * ext + self.intrinsic_coef * intr_n          # (B,)
 
-        # Q(s,·) and Q(s,a)
-        q_s  = self.q_net(obs)                                # (B, A)
-        q_sa = q_s.gather(1, act.unsqueeze(1)).squeeze(1)     # (B,)
+        # ---- Q(s,·) and Q(s,a) ----
+        q_s_online = self.q_net(obs)                                                    # (B, A)
+        q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)                        # (B,)
 
-        # Munchausen term: alpha * clip(log pi(a|s), lo, 0)
-        # Add small epsilon to prevent numerical issues
-        log_pi_s = F.log_softmax(q_s / self.tau, dim=1)       # (B, A)
-        log_pi_a = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)  # (B,)
-        
-        # Clamp with more reasonable bounds and add small epsilon for stability
-        log_pi_a_clipped = torch.clamp(log_pi_a, min=self.lo, max=-1e-8)
-        r_aug = total_rew + self.alpha_m * log_pi_a_clipped
-
-        # Bootstrap on non-terminals
-        bootstrap_mask = 1.0 - term
-
+        # ---- Munchausen log-policy at s ----
         with torch.no_grad():
-            # Use online network for action selection (Double DQN style)
-            q_next_online = self.q_net(next_obs)
-            next_actions = q_next_online.argmax(dim=1)
-            
-            # Use target network for value estimation
-            q_next_tgt = self.target_q_net(next_obs)          # (B, A)
-            
-            # For Munchausen, we can use either soft values or selected Q-values
-            # Using soft values as in your original implementation
-            v_soft_next = self._soft_value_next(q_next_tgt)   # (B,)
-            target = r_aug + bootstrap_mask * self.gamma * v_soft_next
+            # subtract max for numerical stability
+            v_s = q_s_online.max(1, keepdim=True)[0]                                    # (B,1)
+            logsum_s = torch.logsumexp((q_s_online - v_s) / self.tau, dim=1, keepdim=True)  # (B,1)
+            log_pi_s = q_s_online - v_s - self.tau * logsum_s                           # (B,A)
+            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)                 # (B,)
+            log_pi_sa = torch.clamp(log_pi_sa, min=self.lo, max=0.0)                    # clip
 
+        munchausen_reward = base_reward + self.alpha_m * log_pi_sa                      # (B,)
+
+        # ---- soft backup at s' ----
+        with torch.no_grad():
+            q_sp_online = self.q_net(next_obs)                                          # (B, A)
+            v_sp = q_sp_online.max(1, keepdim=True)[0]                                  # (B,1)
+            logsum_sp = torch.logsumexp((q_sp_online - v_sp) / self.tau, dim=1, keepdim=True)  # (B,1)
+            log_pi_sp = q_sp_online - v_sp - self.tau * logsum_sp                       # (B, A)
+            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                            # (B, A)
+
+            q_sp_tgt = self.target_q_net(next_obs)                                      # (B, A)
+            soft_backup = (pi_sp * (q_sp_tgt - self.tau * log_pi_sp)).sum(dim=1)        # (B,)
+
+            bootstrap_mask = 1.0 - term                                                 # (B,)
+            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup      # (B,)
+
+        # ---- TD loss & update ----
         loss = F.smooth_l1_loss(q_sa, target)
-
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        
-        # Add gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=1.0)
-        
+        if self.grad_clip is not None and self.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
         self.optimizer.step()
 
-        # Log additional metrics
+        # ---- diagnostics ----
         with torch.no_grad():
-            wandb.log({
-                "loss/td": loss.item(),
-                "mrl/log_pi_a_mean": log_pi_a.mean().item(),
-                "mrl/log_pi_a_std": log_pi_a.std().item(),
-                "mrl/r_aug_mean": r_aug.mean().item(),
-                "mrl/munchausen_bonus_mean": (self.alpha_m * log_pi_a_clipped).mean().item(),
-            }, commit=False)
+            mean_gap = (q_s_online.max(1, keepdim=True)[0] - q_s_online).mean().item()
+        try:
+            wandb.log({"loss/td": float(loss.item()), "gap/full_mean_gap": mean_gap})
+        except Exception:
+            pass
+
 
 def main():
+    import time
+    import numpy as np
+    import wandb
+    from agents import customised_doorkey
+
     wandb.init(project="dqn", name="rnd-mrl-fixed")
 
     ENV_NAME = "Fixed-DoorKey-v0"
-
-    max_episode_steps = 400
+    max_episode_steps = 1600
     total_timesteps = 1_000_000
 
-    env = gym.make(
-        "Fixed-DoorKey-v0", size=10,
-        key_pos=(1, 8), door_pos=(5, 5), goal_pos=(8, 1),
+    # ---------- Environments (match your 16x16 blue config) ----------
+    env = customised_doorkey.make_fixed_doorkey_env(
+        size=16,
+        key_color="blue", key_pos=(9, 1),
+        door_color="blue", door_pos=(12, 7),
+        goal_pos=(9, 14),
         agent_start_pos=(1, 1), agent_start_dir=0,
-        disable_env_checker=True, max_episode_steps=max_episode_steps, render_mode="rgb_array",
+        wall_cells=[(9, 7), (10, 7), (11, 7), (13, 7), (14, 7)],
+        ensure_door_in_wall=True,
+        empty_cells=[(8, 5)],
+        render_mode="rgb_array",
+        max_episode_steps=max_episode_steps,
     )
-    env = customised_doorkey.PatchGridWrapper(env, wall_cells=[(6, 1), (7, 1)], goal_cell=(7, 0))
-    env = FullyObsWrapper(env)
-    env = customised_doorkey.NoDropWrapper(env)
-    
 
-    eval_env = gym.make(
-        "Fixed-DoorKey-v0", size=10,
-        key_pos=(1, 8), door_pos=(5, 5), goal_pos=(8, 1),
+    eval_env = customised_doorkey.make_fixed_doorkey_env(
+        size=16,
+        key_color="blue", key_pos=(9, 1),
+        door_color="blue", door_pos=(12, 7),
+        goal_pos=(9, 14),
         agent_start_pos=(1, 1), agent_start_dir=0,
-        disable_env_checker=True, max_episode_steps=max_episode_steps, render_mode="rgb_array",
+        wall_cells=[(9, 7), (10, 7), (11, 7), (13, 7), (14, 7)],
+        ensure_door_in_wall=True,
+        empty_cells=[(8, 5)],
+        render_mode="rgb_array",
+        max_episode_steps=max_episode_steps,
     )
-    eval_env = customised_doorkey.PatchGridWrapper(eval_env, wall_cells=[(6, 1), (7, 1)], goal_cell=(7, 0))
-    eval_env = FullyObsWrapper(eval_env)
-    eval_env = customised_doorkey.NoDropWrapper(eval_env)
 
-    # Fixed hyperparameters - closer to working RND version
+    # ---------- Configs ----------
+    # Use instances (simple attribute bags)
     dqn_cfg = type("DQNConfig", (), {
-        "hidden_size": 512,        # Restored to original working size
-        "lr": 1e-4,                # Restored to original working learning rate
+        "hidden_size": 1024,
+        "lr": 2.5e-4,
         "gamma": 0.99,
         "batch_size": 128,
-        "replay_buffer_size": 1_000_000,
+        "replay_buffer_size": 500_000,
         "target_update_freq": 2000,
-        # Munchausen parameters - more moderate values
-        "tau": 0.1,                # Increased from 0.03 for more exploration
-        "alpha_m": 0.5,            # Reduced from 0.9 to be less aggressive
-        "lo": -5.0,                # Less restrictive bound
-    })
+    })()
 
     rnd_cfg = type("RNDConfig", (), {
         "intrinsic_coef": 1.0,
         "extrinsic_coef": 2.0,
         "lr": 1e-4,
-        "learning_starts": 1000,   # Back to original faster start
+        "learning_starts": 10_000,
         "epsilon_start": 1.0,
-        "epsilon_end": 0.01,
-        "epsilon_decay": 0.9998,
-        "rnd_mask_prob": 0.25,
-    })
+        "epsilon_end": 0.05,
+        # this agent uses linear frac decay in train(); keep for completeness
+        "epsilon_decay": 0.999,
+        "rnd_mask_prob": 0.5,   # predictor keep ratio / mask prob
+    })()
 
+    # ---------- Agent (RND + Munchausen) ----------
     agent = RND_MRL_DQN_Agent(
         env=env,
-        env_name=ENV_NAME,
         eval_env=eval_env,
+        env_name=ENV_NAME,
         dqn_cfg=dqn_cfg,
-        rnd_cfg=rnd_cfg
+        rnd_cfg=rnd_cfg,
+        tau=0.06,        # temperature
+        alpha_m=0.3,     # Munchausen weight
+        lo=-1.0,         # logπ clamp lower bound
+        ext_coef=2.0,    # override rnd_cfg.extrinsic_coef if desired
+        int_coef=1.0,    # override rnd_cfg.intrinsic_coef if desired
+        grad_clip=10.0,
     )
 
+    # ---------- Train ----------
     start = time.time()
     agent.train(total_timesteps=total_timesteps, max_episode_steps=max_episode_steps)
     end = time.time()
     print(f"Training finished in {(end - start) / 60:.2f} minutes.")
     agent.print_visit_counts()
+
 
 if __name__ == "__main__":
     main()

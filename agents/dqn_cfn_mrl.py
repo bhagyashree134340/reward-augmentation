@@ -33,79 +33,65 @@ class CFN_MRL_DQNAgent(DQN_CFNAgent):
         self.int_coef = float(int_coef)
         self.grad_clip = float(grad_clip)
 
-    @torch.no_grad()
-    def _log_softmax_tau(self, q_values: torch.Tensor) -> torch.Tensor:
-        return F.log_softmax(q_values / self.tau, dim=1)
 
-    @torch.no_grad()
-    def _soft_value_next(self, q_next_target: torch.Tensor) -> torch.Tensor:
-        log_pi_next = self._log_softmax_tau(q_next_target)
-        pi_next = log_pi_next.exp()
-        v_soft = torch.sum(pi_next * (q_next_target - self.tau * log_pi_next), dim=1)
-        return v_soft
+    def update_q(self, batch, step):
+        # Convert batch data to tensors
+        obs = torch.from_numpy(batch["obs"]).float().to(self.device)                 # (B, D)
+        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)       # (B, D)
+        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)      # (B,)
+        ext = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)     # (B,)
+        intr = torch.from_numpy(batch["intr"].squeeze(-1)).float().to(self.device)   # (B,)
+        term = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)   # (B,)
+        timeout = torch.from_numpy(batch["timeout"].squeeze(-1)).float().to(self.device)
 
-    def update_q(self, batch, global_step: int):
-        device = self.device
-        obs = torch.as_tensor(batch["obs"], device=device, dtype=torch.float32)
-        actions = torch.as_tensor(batch["act"], device=device, dtype=torch.long).squeeze(-1)
-        rewards = torch.as_tensor(batch["rew"], device=device, dtype=torch.float32).squeeze(-1)
-        next_obs = torch.as_tensor(batch["next_obs"], device=device, dtype=torch.float32)
-        term = torch.as_tensor(batch.get("term", np.zeros_like(batch["rew"])), device=device).squeeze(-1).bool()
-        timeout = torch.as_tensor(batch.get("timeout", np.zeros_like(batch["rew"])), device=device).squeeze(-1).bool()
-        intr_raw = torch.as_tensor(batch.get("intr", np.zeros_like(batch["rew"])), device=device, dtype=torch.float32).squeeze(-1)
+        # Munchausen reward shaping
+        base_reward = self.ext_coef * ext + self.int_coef * self.lambda_bonus * intr  # (B,)
 
-        # Current Q-values
-        q_all = self.q_net(obs)
-        q_sa = q_all.gather(1, actions.unsqueeze(1)).squeeze(1)
-        
-        # Next Q-values from target network
-        q_next_tgt = self.target_q_net(next_obs)
-        
-        # Total reward (external + intrinsic) - no normalization
-        intr_term = self.lambda_bonus * intr_raw
-        total_reward = self.ext_coef * rewards + self.int_coef * intr_term
+        # Q-value for current state-action pairs
+        q_s_online = self.q_net(obs)                          # (B, A)
+        q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)  # (B,)
 
         with torch.no_grad():
-            # Soft value for next state
-            v_soft_next = self._soft_value_next(q_next_tgt)
-            
-            # For Munchausen: we need current policy on CURRENT state, not next state
-            # This is the key fix - Munchausen uses current state log probabilities
-            log_pi_current = F.log_softmax(q_all / self.tau, dim=1)
-            log_pi_a = torch.clamp(
-                log_pi_current.gather(1, actions.unsqueeze(1)).squeeze(1), 
-                min=self.lo, max=0.0
-            )
-            
-            # Munchausen RL: add tau * log_pi to the reward, not the target
-            munchausen_reward = total_reward + self.alpha_m * self.tau * log_pi_a
-            
-            # Standard target computation
-            bootstrap_mask = (~term).float()  # Don't bootstrap on timeout either
-            target = munchausen_reward + self.gamma * bootstrap_mask * v_soft_next
+            # Log-policy terms for Munchausen update
+            v_s = q_s_online.max(1, keepdim=True)[0]
+            logsum_s = torch.logsumexp((q_s_online - v_s) / self.tau, dim=1, keepdim=True)
+            log_pi_s = q_s_online - v_s - self.tau * logsum_s                        # (B, A)
+            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)             # (B,)
+            log_pi_sa = torch.clamp(log_pi_sa, min=self.lo, max=0.0)
 
-        # Loss and optimization
+        munchausen_reward = base_reward + self.alpha_m * log_pi_sa                  # (B,)
+
+        with torch.no_grad():
+            # Next state value estimation using soft backup
+            q_sp_online = self.q_net(next_obs)                                       # (B, A)
+            v_sp_on = q_sp_online.max(1, keepdim=True)[0]
+            logsum_sp = torch.logsumexp((q_sp_online - v_sp_on) / self.tau, dim=1, keepdim=True)
+            log_pi_sp = q_sp_online - v_sp_on - self.tau * logsum_sp                # (B, A)
+            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                         # (B, A)
+
+            q_sp_target = self.target_q_net(next_obs)                                # (B, A)
+            soft_backup = (pi_sp * (q_sp_target - self.tau * log_pi_sp)).sum(dim=1)  # (B,)
+
+            bootstrap_mask = 1.0 - term
+            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup  # (B,)
+
+        # Compute loss and update parameters
         loss = F.smooth_l1_loss(q_sa, target)
+
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        if self.grad_clip and self.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
+        # torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=self.max_grad_norm)
         self.optimizer.step()
 
-        # Logging
-        if (global_step % 1000) == 0:
-            try:
-                top2 = q_all.topk(2, dim=1).values
-                gap = (top2[:, 0] - top2[:, 1]).mean().item()
-                wandb.log({
-                    "loss/q": loss.item(),
-                    "munchausen/log_pi_current_mean": log_pi_a.mean().item(),
-                    "munchausen/munchausen_reward_mean": munchausen_reward.mean().item(),
-                    "intrinsic/cfn_raw_mean": intr_raw.mean().item(),
-                    "diagnostics/action_gap": gap,
-                }, step=global_step)
-            except Exception:
-                pass
+        # Diagnostics
+        with torch.no_grad():
+            gap = (q_s_online.max(1, keepdim=True)[0] - q_s_online).mean().item()
+        wandb.log({
+            "loss/td": loss.item(),
+            "gap/full_mean_gap": gap
+        }, step=step)
+
+
 
 
 def main():
@@ -113,46 +99,42 @@ def main():
     total_timesteps = 1_000_000
     max_episode_steps = 400
 
-    env = gym.make(
-        "Fixed-DoorKey-v0",
+    env = customised_doorkey.make_fixed_doorkey_env(
         size=10,
-        key_pos=(1, 8),
-        door_pos=(5, 5),
+        key_color="red", key_pos=(1, 8),     
+        door_color="red", door_pos=(5, 5),   
         goal_pos=(8, 1),
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        disable_env_checker=True,
-        max_episode_steps=max_episode_steps,
+        agent_start_pos=(1, 1), agent_start_dir=0,
+        wall_cells=[(7, 2), (8, 2)],
+        # extra_keys=[((9, 1), "blue")],
+        # extra_doors=[((12, 7), "blue", True)],
+        ensure_door_in_wall=True,
         render_mode="rgb_array",
+        max_episode_steps=max_episode_steps,
     )
-    env = customised_doorkey.PatchGridWrapper(env, wall_cells=[(6, 1), (7, 1)], goal_cell=(7, 0))
-    env = FullyObsWrapper(env)
-    env = customised_doorkey.NoDropWrapper(env)
 
-    eval_env = gym.make(
-        "Fixed-DoorKey-v0",
+    eval_env = customised_doorkey.make_fixed_doorkey_env(
         size=10,
-        key_pos=(1, 8),
-        door_pos=(5, 5),
+        key_color="red", key_pos=(1, 8),     
+        door_color="red", door_pos=(5, 5),   
         goal_pos=(8, 1),
-        agent_start_pos=(1, 1),
-        agent_start_dir=0,
-        disable_env_checker=True,
-        max_episode_steps=max_episode_steps,
+        agent_start_pos=(1, 1), agent_start_dir=0,
+        wall_cells=[(7, 2), (8, 2)],
+        # extra_keys=[((9, 1), "blue")],
+        # extra_doors=[((12, 7), "blue", True)],
+        ensure_door_in_wall=True,
         render_mode="rgb_array",
+        max_episode_steps=max_episode_steps,
     )
-    eval_env = customised_doorkey.PatchGridWrapper(eval_env, wall_cells=[(6, 1), (7, 1)], goal_cell=(7, 0))
-    eval_env = FullyObsWrapper(eval_env)
-    eval_env = customised_doorkey.NoDropWrapper(eval_env)
 
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 512,
         "lr": 3e-4,
         "gamma": 0.99,
-        "batch_size": 256,
+        "batch_size": 128,
         "replay_buffer_size": 500_000,
-        "target_update_freq": 1000,
-        "learning_starts": 10_000,
+        "target_update_freq": 5000,
+        "learning_starts": 20_000,
     })()
 
     cfn_cfg = type("CFNConfig", (), {
@@ -172,11 +154,11 @@ def main():
         env_name="Fixed-DoorKey-v0",
         dqn_cfg=dqn_cfg,
         cfn_cfg=cfn_cfg,
-        tau=0.1,           # Conservative temperature
-        alpha_m=0.03,      # Conservative Munchausen coefficient  
+        tau=0.06,           
+        alpha_m=0.3,      
         lo=-1.0,           
-        ext_coef=1.0,      
-        int_coef=0.0,      # Start without intrinsic rewards
+        ext_coef=2.0,      
+        int_coef=1.0,      # no cfn
         grad_clip=10.0,    
     )
 

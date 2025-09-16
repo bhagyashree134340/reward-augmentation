@@ -93,6 +93,8 @@ class DQN_RNDAgent:
         self.reward_rms = RunningMeanStd(shape=())
         self.reward_filter = RewardForwardFilter(gamma=0.99)
 
+        self.eps_start, self.eps_end, self.decay_steps = 1.0, 0.05, 200_000
+
     def process_obs(self, obs_raw, env_for_pose=None):
         img_full = np.asarray(obs_raw["image"], dtype=np.int16)
         img = img_full[1:-1, 1:-1, :]
@@ -193,7 +195,6 @@ class DQN_RNDAgent:
 
         obs_raw, _ = self.env.reset()
         obs = self.process_obs(obs_raw)
-        self.update_obs_rms(obs)
 
         stats = EpisodeStats([], [], [])
         epsilon = self.rnd_cfg.epsilon_start
@@ -206,6 +207,9 @@ class DQN_RNDAgent:
         self.increment_visit_counts()
 
         while current_timestep < total_timesteps:
+            frac = min(1.0, current_timestep / self.decay_steps)
+            epsilon = self.eps_start + (self.eps_end - self.eps_start) * frac
+
             action = self.act(obs, epsilon)
 
             next_obs_raw, ext_reward, terminated, truncated, _ = self.env.step(action)
@@ -221,6 +225,7 @@ class DQN_RNDAgent:
                 wandb.log({"ext_rew": ext_reward}, step=current_timestep)
 
             next_obs_tensor = self.obs_to_float_tensor(next_obs).unsqueeze(0)
+            # self.update_obs_rms(next_obs_tensor.cpu().numpy().squeeze(0))
             int_reward_tensor = self.compute_intrinsic_reward(next_obs_tensor)
             int_reward = float(int_reward_tensor.item())
 
@@ -228,9 +233,9 @@ class DQN_RNDAgent:
             self.reward_rms.update(np.array([discounted_r]))
             norm_int_reward = int_reward / np.sqrt(np.maximum(self.reward_rms.var, 1e-8))
 
-            if current_timestep % 1000 == 0:
-                agent_x, agent_y = map(int, self.env.unwrapped.agent_pos)
-                wandb.log({f"int_reward/cell({agent_y - 1},{agent_x - 1})": norm_int_reward}, step=current_timestep)
+            # if current_timestep % 1000 == 0:
+            #     agent_x, agent_y = map(int, self.env.unwrapped.agent_pos)
+            #     wandb.log({f"int_reward/cell({agent_y - 1},{agent_x - 1})": norm_int_reward}, step=current_timestep)
 
             total_reward = self.extrinsic_coef * ext_reward + self.intrinsic_coef * norm_int_reward
 
@@ -267,7 +272,7 @@ class DQN_RNDAgent:
                 loss.backward()
                 self.rnd_optimizer.step()
 
-                batch = self.replay_buffer.sample(self.batch_size)
+                # batch = self.replay_buffer.sample(self.batch_size)
                 self.update_dqn(batch)
 
             if current_timestep % 1000 == 0 and current_timestep > 0:
@@ -302,13 +307,14 @@ class DQN_RNDAgent:
                     f"Return: {episode_return:.2f} | Ext Reward: {ext_reward} | Total Timesteps: {current_timestep}"
                 )
 
-                if epsilon > self.rnd_cfg.epsilon_end:
-                    epsilon *= self.rnd_cfg.epsilon_decay
+                # if epsilon > self.rnd_cfg.epsilon_end:
+                #     epsilon *= self.rnd_cfg.epsilon_decay
 
                 obs_raw, _ = self.env.reset()
                 obs = self.process_obs(obs_raw)
                 self.update_obs_rms(obs)
                 self.increment_visit_counts()
+
                 episode_return = 0
                 episode_step = 0
                 episode_num += 1
@@ -318,7 +324,7 @@ class DQN_RNDAgent:
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="eval_rnd")
 
             if current_timestep % 5000 == 0:
-                plot_intrinsic_vs_true_bonus_heatmap_minigrid_rnd(self, step=current_timestep)
+                plot_rnd_intrinsic_three_panels_agg(self, agg="mean", step=current_timestep)
                 
 
     def update_dqn(self, batch):
@@ -341,9 +347,9 @@ class DQN_RNDAgent:
             next_a = next_q.argmax(1)
             tgt_q = self.target_q_net(next_obs)
             max_next = tgt_q.gather(1, next_a.unsqueeze(1)).squeeze(1)
-            bootstrap_mask = 1.0 - term  
+            bootstrap_mask = 1.0 - term
             target = total_rew + bootstrap_mask * self.gamma * max_next
-
+        
         loss = F.smooth_l1_loss(q_val, target)
         self.optimizer.zero_grad()
         loss.backward()
@@ -355,88 +361,189 @@ class DQN_RNDAgent:
             print(" ".join(f"{v:4d}" for v in row))
 
 
-def plot_intrinsic_vs_true_bonus_heatmap_minigrid_rnd(self, step):
-        """
-        Plots and logs heatmaps comparing true bonus (from visitation count)
-        vs intrinsic reward bonus from RND. Uses base env to ensure correct rendering.
-        """
-        visit_counts = self.visit_counts
-        h, w = visit_counts.shape
+def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=None):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import torch
+    from minigrid.core.world_object import Door, Key
 
-        # Compute true bonus
-        true_bonus = 1.0 / np.sqrt(visit_counts + 1e-8)
-        intrinsic_bonus = np.full_like(true_bonus, fill_value=np.nan, dtype=np.float32)
+    def _apply_observation_wrappers(top_env, raw_obs):
+        """Replay observation() transforms of wrapper stack (bottom-up)."""
+        wrappers, env = [], top_env
+        while hasattr(env, "env"):
+            if hasattr(env, "observation"):
+                wrappers.append(env)
+            env = env.env
+        for w in reversed(wrappers):  # innermost first
+            raw_obs = w.observation(raw_obs)
+        return raw_obs
 
-        base_env = self.eval_env.unwrapped  # Access base MiniGrid env
+    def _obs_vec_at_pose(x, y, d):
+        base.agent_pos = (x + 1, y + 1)
+        base.agent_dir = d
+        raw = base.gen_obs()
+        wrapped = _apply_observation_wrappers(agent.eval_env, raw)
+        return agent.process_obs(wrapped, env_for_pose=base)
 
-        for y in range(h):
-            for x in range(w):
-                try:
-                    base_env.reset()
-                    base_env.agent_pos = (x + 1, y + 1)  # Offset for wall
-                    base_env.agent_dir = np.random.randint(0, 4)  # Random direction
-                    base_env.step(base_env.actions.toggle)  # Dummy step to refresh visuals
+    def _find_primary_door(b):
+        """Pick a single 'primary' door to manipulate."""
+        H, W = b.grid.height, b.grid.width
+        primary = None
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                obj = b.grid.get(x, y)
+                if isinstance(obj, Door):
+                    # Heuristic: prefer locked red/yellow door; else first door.
+                    if primary is None:
+                        primary = (x, y, obj)
+                    # Prefer locked main door if available
+                    if getattr(obj, "is_locked", False):
+                        return (x, y, obj)
+        return primary  # may be None if no doors exist
 
-                    obs_raw = base_env.render()  # Must call render on base env
-                    obs = self.process_obs(obs_raw)
-                    obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+    def _remove_keys_of_color(b, color: str):
+        """Remove keys of a given color from the grid (simulate 'picked up')."""
+        H, W = b.grid.height, b.grid.width
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                obj = b.grid.get(x, y)
+                if isinstance(obj, Key) and getattr(obj, "color", None) == color:
+                    b.grid.set(x, y, None)
 
-                    if obs_tensor.max() > 1.0:
-                        obs_tensor = obs_tensor / 255.0
+    # ---------------- env setup ----------------
 
-                    # Resize if needed
-                    c, h_rms, w_rms = self.obs_rms.mean.shape
-                    if obs_tensor.shape[-2:] != (h_rms, w_rms):
-                        obs_tensor = F.interpolate(obs_tensor, size=(h_rms, w_rms), mode='bilinear', align_corners=False)
+    base = agent.eval_env.unwrapped
+    H_in, W_in = base.grid.height - 2, base.grid.width - 2  # interior only
+
+    # normalization (do NOT update RMS here)
+    use_norm = normalized and hasattr(agent, "reward_rms") and hasattr(agent.reward_rms, "var")
+    denom = None
+    if use_norm:
+        try:
+            denom = float(np.sqrt(max(float(agent.reward_rms.var), 1e-8)))
+        except Exception:
+            use_norm, denom = False, None
+
+    # optional sanity check for obs dim
+    expected_dim = None
+    if hasattr(agent, "obs_mean"):
+        try:
+            expected_dim = int(agent.obs_mean.shape[-1])
+        except Exception:
+            expected_dim = None
+
+    # Panels (we’ll fill in actual door color at runtime)
+    configs = [
+        ("Closed, no key", dict(door_open=False, has_key=False)),
+        ("Closed, has key", dict(door_open=False, has_key=True)),
+        ("Open, has key",   dict(door_open=True,  has_key=True)),
+    ]
+
+    maps, vmin, vmax = [], +1e9, -1e9
+
+    # ---------------- compute heatmaps ----------------
+    for _, cfg in configs:
+        # IMPORTANT: reset the *top-level* env so any wrappers (e.g. patchers) run
+        agent.eval_env.reset()
+        base = agent.eval_env.unwrapped
+
+        # Detect primary door (pos + color)
+        pd = _find_primary_door(base)
+        pd_pos, pd_color = None, None
+        if pd is not None:
+            x_d, y_d, door_obj = pd
+            pd_pos = (x_d, y_d)
+            pd_color = getattr(door_obj, "color", None)
+
+        # Equip key if requested (use detected door color if available)
+        base.carrying = None
+        if cfg["has_key"]:
+            key_color = pd_color if pd_color is not None else "yellow"
+            base.carrying = Key(key_color)
+            # Remove keys of that color from the grid to reflect "already picked up"
+            _remove_keys_of_color(base, key_color)
+
+        # Toggle only the primary door if it exists; leave other doors as-is
+        if pd_pos is not None:
+            x_d, y_d = pd_pos
+            obj = base.grid.get(x_d, y_d)
+            if isinstance(obj, Door):
+                obj.is_open = bool(cfg["door_open"])
+                # If closed, keep it locked (typical DoorKey semantics); if open, unlock
+                obj.is_locked = not obj.is_open
+                base.grid.set(x_d, y_d, obj)
+
+        # Sweep positions/directions
+        M_dir = np.empty((4, H_in, W_in), dtype=np.float32)
+        for d in range(4):
+            for yy in range(H_in):
+                for xx in range(W_in):
+                    obs_vec = _obs_vec_at_pose(xx, yy, d)
+                    obs_t = agent.obs_to_float_tensor(obs_vec)
+                    if obs_t.ndim == 1:
+                        obs_t = obs_t.unsqueeze(0)
+
+                    if expected_dim is not None and obs_t.shape[-1] != expected_dim:
+                        raise ValueError(
+                            f"Observation dim mismatch during plotting: got {obs_t.shape[-1]}, "
+                            f"expected {expected_dim}. Ensure wrappers/process_obs match training."
+                        )
 
                     with torch.no_grad():
-                        bonus = self.compute_intrinsic_reward(obs_tensor).item()
-                        norm_int_reward = bonus / np.sqrt(np.maximum(self.reward_rms.var, 1e-8))
-                        intrinsic_bonus[y, x] = norm_int_reward
+                        bonus = float(agent.compute_intrinsic_reward(obs_t).item())
+                    if use_norm and denom is not None:
+                        bonus /= denom
+                    M_dir[d, yy, xx] = bonus
 
-                except Exception as e:
-                    print(f"Failed at ({x},{y}): {e}")
-                    continue
+        M = np.nanmax(M_dir, axis=0) if agg == "max" else np.nanmean(M_dir, axis=0)
+        maps.append(M)
+        if np.isfinite(M).any():
+            vmin = min(vmin, float(np.nanmin(M)))
+            vmax = max(vmax, float(np.nanmax(M)))
 
-        # Mask unvisited cells
-        true_bonus_masked = np.ma.masked_where(visit_counts == 0, true_bonus)
-        intrinsic_bonus_masked = np.ma.masked_where(visit_counts == 0, intrinsic_bonus)
+    # ---------------- plot ----------------
+    fig, axs = plt.subplots(1, 4, figsize=(28, 9), dpi=200,
+                            gridspec_kw={"width_ratios": [1, 1, 1, 0.04]})
+    cax = axs[3]
+    counts = getattr(agent, "visit_counts", None)
 
-        # Plotting
-        fig, axs = plt.subplots(1, 2, figsize=(12, 5))
-        true_vmin = np.nanmin(true_bonus_masked)
-        true_vmax = np.nanmax(true_bonus_masked)
-        # Percentile clipping to avoid extreme outliers
-        clipped_intrinsic_bonus = intrinsic_bonus.copy()
-        vmin_clip = np.nanpercentile(clipped_intrinsic_bonus, 1)
-        vmax_clip = np.nanpercentile(clipped_intrinsic_bonus, 99)
+    def _safe_matrix(M):
+        return np.zeros_like(M, dtype=np.float32) if not np.isfinite(M).any() else M
 
-        # Clip values for visualization only
-        clipped_intrinsic_bonus = np.clip(clipped_intrinsic_bonus, vmin_clip, vmax_clip)
-        rnd_vmin, rnd_vmax = vmin_clip, vmax_clip
+    last_im = None
+    for ax, (title, _), M in zip(axs[:3], configs, maps):
+        Mplot = _safe_matrix(M)
+        last_im = ax.imshow(
+            Mplot, cmap="viridis",
+            vmin=None if not np.isfinite(vmin) else vmin,
+            vmax=None if not np.isfinite(vmax) else vmax,
+            origin="upper", interpolation="nearest"
+        )
+        suffix = " (norm)" if use_norm else ""
+        ax.set_title(f"{title} ({agg} over dir){suffix}", fontsize=12, pad=6)
+        ax.set_xticks(range(W_in)); ax.set_yticks(range(H_in))
 
-        # True Bonus Map
-        im0 = axs[0].imshow(true_bonus_masked, cmap="magma", vmin=true_vmin, vmax=true_vmax)
-        axs[0].set_title("True Bonus (1/sqrt(count))")
-        for y in range(h):
-            for x in range(w):
-                if visit_counts[y, x] > 0:
-                    axs[0].text(x, y, f"{visit_counts[y, x]}", ha='center', va='center',
-                                color='white' if true_bonus[y, x] < (true_vmin + true_vmax) / 2 else 'black')
-        fig.colorbar(im0, ax=axs[0])
+        if isinstance(counts, np.ndarray) and counts.shape == (H_in, W_in):
+            for yy in range(H_in):
+                for xx in range(W_in):
+                    ax.text(xx, yy, str(int(counts[yy, xx])),
+                            ha="center", va="center", fontsize=8, color="white")
 
-        # RND Intrinsic Bonus Map
-        im1 = axs[1].imshow(clipped_intrinsic_bonus, cmap="viridis", vmin=rnd_vmin, vmax=rnd_vmax)
-        axs[1].set_title("RND Intrinsic Bonus")
-        fig.colorbar(im1, ax=axs[1])
+    cb = fig.colorbar(last_im, cax=cax)
+    cb.set_label("RND intrinsic" + (" (normalized)" if use_norm else " (raw)"), labelpad=6)
 
-        for ax in axs:
-            ax.set_xticks(range(w))
-            ax.set_yticks(range(h))
+    try:
+        import wandb
+        if step is not None:
+            wandb.log(
+                {f"heatmap/rnd_intrinsic_three_panels_{agg}{'_norm' if use_norm else ''}": wandb.Image(fig)},
+                step=step
+            )
+    except Exception:
+        pass
 
-        plt.tight_layout()
-        wandb.log({f"rnd/true_vs_intrinsic_bonus_heatmap": wandb.Image(fig)}, step=step)
-        plt.close(fig)
+    plt.close(fig)
+
 
 
 
@@ -444,48 +551,86 @@ def main():
     wandb.init(project="dqn", name="rnd")
     ENV_NAME = "Fixed-DoorKey-v0"
 
-    max_episode_steps = 400
+    max_episode_steps = 1600
     total_timesteps = 1_000_000
 
-    env = gym.make(
-        "Fixed-DoorKey-v0", size=10,
-        key_pos=(1, 8), door_pos=(5, 5), goal_pos=(8, 1),
-        agent_start_pos=(1, 1), agent_start_dir=0,
-        disable_env_checker=True, max_episode_steps=max_episode_steps, render_mode="rgb_array",
-    )
-    env = customised_doorkey.PatchGridWrapper(env, wall_cells=[(6, 1), (7, 1)], goal_cell=(7, 0))
-    env = FullyObsWrapper(env)
-    env = customised_doorkey.NoDropWrapper(env)
+    # env = customised_doorkey.make_fixed_doorkey_env(
+    #     size=10,
+    #     key_color="red", key_pos=(1, 8),     
+    #     door_color="red", door_pos=(5, 5),   
+    #     goal_pos=(8, 1),
+    #     agent_start_pos=(1, 1), agent_start_dir=0,
+    #     wall_cells=[(7, 2), (8, 2)],
+    #     # extra_keys=[((9, 1), "blue")],
+    #     # extra_doors=[((12, 7), "blue", True)],
+    #     ensure_door_in_wall=True,
+    #     render_mode="rgb_array",
+    #     max_episode_steps=max_episode_steps,
+    # )
+
+    # eval_env = customised_doorkey.make_fixed_doorkey_env(
+    #     size=10,
+    #     key_color="red", key_pos=(1, 8),     
+    #     door_color="red", door_pos=(5, 5),   
+    #     goal_pos=(8, 1),
+    #     agent_start_pos=(1, 1), agent_start_dir=0,
+    #     wall_cells=[(7, 2), (8, 2)],
+    #     # extra_keys=[((9, 1), "blue")],
+    #     # extra_doors=[((12, 7), "blue", True)],
+    #     ensure_door_in_wall=True,
+    #     render_mode="rgb_array",
+    #     max_episode_steps=max_episode_steps,
+    # )
     
 
-    eval_env = gym.make(
-        "Fixed-DoorKey-v0", size=10,
-        key_pos=(1, 8), door_pos=(5, 5), goal_pos=(8, 1),
+    env = customised_doorkey.make_fixed_doorkey_env(
+        size=16,
+        key_color="blue", key_pos=(9, 1),     
+        door_color="blue", door_pos=(12, 7),   
+        goal_pos=(9, 14),
         agent_start_pos=(1, 1), agent_start_dir=0,
-        disable_env_checker=True, max_episode_steps=max_episode_steps, render_mode="rgb_array",
+        wall_cells=[(9, 7), (10, 7), (11, 7), (13, 7), (14, 7)],
+        # extra_keys=[((9, 1), "blue")],
+        # extra_doors=[((12, 7), "blue", True)],
+        ensure_door_in_wall=True,
+        empty_cells=[(8, 5)],
+        render_mode="rgb_array",
+        max_episode_steps=max_episode_steps,
     )
-    eval_env = customised_doorkey.PatchGridWrapper(eval_env, wall_cells=[(6, 1), (7, 1)], goal_cell=(7, 0))
-    eval_env = FullyObsWrapper(eval_env)
-    eval_env = customised_doorkey.NoDropWrapper(eval_env)
+
+    eval_env = customised_doorkey.make_fixed_doorkey_env(
+        size=16,
+        key_color="blue", key_pos=(9, 1),     
+        door_color="blue", door_pos=(12, 7),   
+        goal_pos=(9, 14),
+        agent_start_pos=(1, 1), agent_start_dir=0,
+        wall_cells=[(9, 7), (10, 7), (11, 7), (13, 7), (14, 7)],
+        # extra_keys=[((9, 1), "blue")],
+        # extra_doors=[((12, 7), "blue", True)],
+        ensure_door_in_wall=True,
+        empty_cells=[(8, 5)],
+        render_mode="rgb_array",
+        max_episode_steps=max_episode_steps,
+    )
 
     dqn_cfg = type("DQNConfig", (), {
-        "hidden_size": 512,
-        "lr": 1e-4,
-        "gamma": 0.99,
-        "batch_size": 128,
-        "replay_buffer_size": 1_000_000,
-        "target_update_freq": 2000
+        "hidden_size": 1024, #512,
+        "lr": 2.5e-4, #1e-4
+        "gamma": 0.99, #0.99
+        "batch_size": 128, #128
+        "replay_buffer_size": 500_000, #1_000_000,
+        "target_update_freq": 2000 #2000
     })
 
     rnd_cfg = type("RNDConfig", (), {
-        "intrinsic_coef": 1.0,
-        "extrinsic_coef": 2.0,
-        "lr": 1e-4,
-        "learning_starts": 1000,
+        "intrinsic_coef": 1.0, #1.0
+        "extrinsic_coef": 2.0, #2.0
+        "lr": 1e-4, #1e-4,
+        "learning_starts": 10_000, #1000
         "epsilon_start": 1.0,
-        "epsilon_end": 0.01,
-        "epsilon_decay": 0.9998,
-        "rnd_mask_prob": 0.25
+        "epsilon_end": 0.05,
+        "epsilon_decay": 0.999, #0.9998
+        "rnd_mask_prob": 0.5 #0.25
     })
 
     agent = DQN_RNDAgent(

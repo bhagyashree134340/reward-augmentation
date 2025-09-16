@@ -190,3 +190,72 @@ class CoinFlipNetwork(nn.Module):
         with torch.no_grad():
             output = self.forward(obs, update_prior_stats=False)
             return torch.norm(output, p=2, dim=-1) ** 2
+        
+
+
+# class CoinFlipNetwork(nn.Module):
+#     def __init__(self, state_dim, coin_dim, hidden_dim=128, device=None):
+#         super().__init__()
+#         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#         self.net = nn.Sequential(
+#             nn.Linear(state_dim, hidden_dim), nn.ReLU(),
+#             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+#             nn.Linear(hidden_dim, coin_dim),
+#         )
+#         self.prior = nn.Sequential(
+#             nn.Linear(state_dim, hidden_dim), nn.ReLU(),
+#             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+#             nn.Linear(hidden_dim, coin_dim),
+#         )
+#         for p in self.prior.parameters():
+#             p.requires_grad = False
+
+#         # --- init running stats so normalized prior is well-scaled from step 0 ---
+#         self.register_buffer("prior_mean",  torch.zeros(coin_dim))
+#         self.register_buffer("prior_M2",    torch.ones(coin_dim))   # start with var=1
+#         self.register_buffer("prior_count", torch.tensor(1.0))      # start with n=1
+
+#         self.coin_flip_dim = coin_dim
+#         self.to(self.device)
+
+#     def compute_squared_output_norm(self, obs):
+#         obs = obs.to(self.device)
+#         with torch.no_grad():
+#             output = self.forward(obs, update_prior_stats=False)
+#             return torch.norm(output, p=2, dim=-1) ** 2
+
+#     @torch.no_grad()
+#     def update_prior_stats(self, prior_out):
+#         y = prior_out if prior_out.dim() == 2 else prior_out.unsqueeze(0)  # (B, d)
+#         B = float(y.shape[0])
+#         batch_mean = y.mean(0)
+#         batch_M2   = ((y - batch_mean) ** 2).sum(0)
+
+#         n  = float(self.prior_count.item())
+#         m  = self.prior_mean
+#         M2 = self.prior_M2
+
+#         new_n  = n + B
+#         delta  = batch_mean - m
+#         new_m  = m + delta * (B / max(new_n, 1.0))
+#         new_M2 = M2 + batch_M2 + delta * delta * (n * B / max(new_n, 1.0))
+
+#         self.prior_mean.copy_(new_m)
+#         self.prior_M2.copy_(new_M2)
+#         self.prior_count.fill_(new_n)
+
+#     def _prior_std(self):
+#         n = max(float(self.prior_count.item()), 1.0)
+#         var = (self.prior_M2 / n).clamp_min(1e-6)  # slightly larger eps for stability
+#         return var.sqrt()
+
+#     def forward(self, state, update_prior_stats: bool = False):
+#         state = state.to(self.device)
+#         yhat = self.net(state)
+#         with torch.no_grad():
+#             prior_out = self.prior(state)
+#             if update_prior_stats:
+#                 self.update_prior_stats(prior_out)
+#             z = (prior_out - self.prior_mean) / self._prior_std()
+#         return yhat + z
