@@ -7,7 +7,7 @@ from utils.polyak import polyak_update
 
 class SACMRLAgent(SACAgent):
     def __init__(self, env, eval_env, alpha=0.9, tau_m=0.03, lo=-1.0, encoder=None, encoder_output_dim=None, **kwargs):
-        super().__init__(env, eval_env, encoder=encoder, encoder_output_dim=encoder_output_dim, **kwargs)
+        super().__init__(env, eval_env, **kwargs)
         self.alpha_m = alpha
         self.tau_m = tau_m
         self.lo = lo

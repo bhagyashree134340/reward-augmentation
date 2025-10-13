@@ -52,6 +52,8 @@ class SACRNDAgent(SACAgent):
             #            },
             #           step=current_timestep)
 
+           
+
             next_obs_tensor = torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0)
             self.obs_rms.update(next_obs_tensor.numpy())
             norm_obs = (next_obs_tensor - torch.from_numpy(self.obs_rms.mean).float()) / \
@@ -62,9 +64,13 @@ class SACRNDAgent(SACAgent):
             pred = self.rnd.predictor(norm_obs.to(self.device))
             int_reward = 0.5 * ((pred - target) ** 2).sum().item()
 
+            
+
             discounted_r = self.reward_filter.update(int_reward)
             self.reward_rms.update(np.array([discounted_r]))
             norm_int_reward = int_reward / np.sqrt(np.maximum(self.reward_rms.var, 1e-8))
+
+            wandb.log({"int_reward": norm_int_reward}, step=current_timestep)
 
             total_reward = self.extrinsic_coef * ext_reward + self.intrinsic_coef * norm_int_reward
 

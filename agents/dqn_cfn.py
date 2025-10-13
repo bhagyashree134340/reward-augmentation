@@ -1,3 +1,4 @@
+import pathlib
 import os, sys, time, math, logging
 import imageio
 import numpy as np
@@ -20,64 +21,65 @@ import customised_doorkey
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 log = logging.getLogger(__name__)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 class DQN_CFNAgent:
     def __init__(self, env, eval_env, env_name, dqn_cfg, cfn_cfg):
-        # device + AMP
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.use_amp = torch.cuda.is_available()
-        self.scaler_q = torch.amp.GradScaler('cuda', enabled=self.use_amp)
-        self.scaler_cfn = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+        self.use_amp   = torch.cuda.is_available()
+        self.scaler_q  = torch.amp.GradScaler('cuda', enabled=self.use_amp)
+        self.scaler_cfn= torch.amp.GradScaler('cuda', enabled=self.use_amp)
+
+
         if self.use_amp:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
-        # env refs
         self.env, self.eval_env, self.env_name = env, eval_env, env_name
 
-        # obs/action sizes
         obs_space = self.env.observation_space
-        self.obs_shape_hw_c = obs_space["image"].shape if isinstance(obs_space, gym.spaces.Dict) else obs_space.shape
+        if isinstance(obs_space, gym.spaces.Dict):
+            self.obs_shape_hw_c = obs_space["image"].shape
+        else:
+            self.obs_shape_hw_c = obs_space.shape
         self.obs_shape = (self.obs_shape_hw_c[2], self.obs_shape_hw_c[0], self.obs_shape_hw_c[1])
         self.act_dim = self.env.action_space.n
+        # H, W from obs space
+        # self.state_dim = H*W*self.FEAT_PER_CELL + 2 + 4  # cells + (ax,ay) + dir one-hot
 
-        # grid sizes
+
+        # From FullyObsWrapper:
         H, W, _ = self.env.observation_space["image"].shape
-        base = self.env.unwrapped
-        H_int, W_int = base.grid.height - 2, base.grid.width - 2
 
-        # MiniGrid vocab
+        # MiniGrid vocab sizes
         self.N_TYPE, self.N_COLOR, self.N_STATE = 11, 6, 4
-        self.FEAT_PER_CELL = self.N_TYPE + self.N_COLOR + self.N_STATE
+        self.FEAT_PER_CELL = self.N_TYPE + self.N_COLOR + self.N_STATE  # 21
 
-        # CFN one-hot dims (pos + dir + 3 binary flags)
-        self._cfn_H_in, self._cfn_W_in = H_int, W_int
-        self._cfn_pos_dim = H_int * W_int
-        self._cfn_dir_dim = 4
-        self._cfn_flag_dim = 2
-        self.cfn_state_dim = self._cfn_pos_dim + self._cfn_dir_dim + 3 * self._cfn_flag_dim
+        self.cfn_state_dim = 9  
 
-        # one-hot caches
-        self._eye_type = np.eye(self.N_TYPE, dtype=np.float32)
+        # One-hot caches (fast vectorized lookups)
+        self._eye_type  = np.eye(self.N_TYPE,  dtype=np.float32)
         self._eye_color = np.eye(self.N_COLOR, dtype=np.float32)
         self._eye_state = np.eye(self.N_STATE, dtype=np.float32)
-        self._agent_eye = np.eye(H * W, dtype=np.uint8).reshape(H * W, H, W)
 
-        # flat DQN state = cells + (ax,ay) + dir(4)
-        self.state_dim = H * W * self.FEAT_PER_CELL + 2 + 4
+        # Precompute agent one-hot bases for speed (optional)
+        self._agent_eye = np.eye(H*W, dtype=np.uint8).reshape(H*W, H, W)
 
-        # Q nets + opt
+        # New state dim: cell one-hots + agent pos one-hot + dir(sin,cos)
+        # New state dim: cells + agent-pos one-hot + dir one-hot(4)
+        self.state_dim = H*W*self.FEAT_PER_CELL + 2 + 4
+
+
         self.q_net = DDQN(self.state_dim, self.act_dim, dqn_cfg.hidden_size, is_cnn=False).to(self.device)
         self.target_q_net = DDQN(self.state_dim, self.act_dim, dqn_cfg.hidden_size, is_cnn=False).to(self.device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
-        self.optimizer = optim.Adam(self.q_net.parameters(), lr=getattr(dqn_cfg, "lr", 3e-4), eps=1.5e-4)
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=3e-4, eps=1.5e-4)
 
-        # RL hyperparams
         self.gamma = dqn_cfg.gamma
         self.batch_size = dqn_cfg.batch_size
         self.target_update_freq = dqn_cfg.target_update_freq
         self.learning_starts = dqn_cfg.learning_starts
+        self.learning_starts = dqn_cfg.learning_starts
 
-        # replay buffer
         self.replay_buffer = ReplayBuffer(
             dqn_cfg.replay_buffer_size,
             env_dict={
@@ -91,37 +93,39 @@ class DQN_CFNAgent:
             },
         )
 
-        # CFN net/buffer
         self.coin_flip_dim = cfn_cfg.cfn_coin_flip_dim
-        self.cfn = CoinFlipNetwork(self.cfn_state_dim, self.coin_flip_dim, device=self.device).to(self.device)
+        self.cfn = CoinFlipNetwork(state_dim=self.cfn_state_dim,
+                           coin_dim=self.coin_flip_dim,
+                           device=self.device).to(self.device)
         self.cfn_optimizer = optim.RMSprop(self.cfn.parameters(), lr=1e-4, momentum=0.9, eps=1e-4, weight_decay=1e-5)
         self.cfn_buffer = CFNReplayBufferWrapper(
             size=cfn_cfg.cfn_replay_buffer_size,
-            obs_shape=self.cfn_state_dim,
+            obs_shape=self.cfn_state_dim,                
             coin_flip_dim=self.coin_flip_dim,
-            alpha=0.5,
+            alpha=0.5
         )
         self.lambda_bonus = cfn_cfg.cfn_intrinsic_scale
-        self.cfn_batch_size = cfn_cfg.cfn_batch_size
 
-        # ε-sched + eval ε
-        self.eps_start, self.eps_end, self.eps_decay_steps = 1.0, 0.02, 200_000
+        self.eps_start, self.eps_end, self.eps_decay_steps = 1.0, 0.02, 200_000  
         self.eval_epsilon = 0.001
         self.epsilon = self.eps_start
+        self.cfn_batch_size = cfn_cfg.cfn_batch_size
 
-        # counters
         self.step_count = 0
+        h = self.env.unwrapped.grid.height
+        w = self.env.unwrapped.grid.width
+        H_int = self.env.unwrapped.grid.height - 2
+        W_int = self.env.unwrapped.grid.width  - 2
 
-        # visit counts
-        self.visit_counts = np.zeros((H_int, W_int), dtype=np.int32)
-        self.visit_counts_all = np.zeros((H_int, W_int), dtype=np.int32)
-        self.visit_counts_has_key = np.zeros((2, H_int, W_int), dtype=np.int32)
-        self.visit_counts_dooropen = np.zeros((2, H_int, W_int), dtype=np.int32)
-        self.visit_counts_joint = np.zeros((2, 2, H_int, W_int), dtype=np.int32)
+        self.visit_counts = np.zeros((h - 2, w - 2), dtype=np.int32)
+        self.visit_counts_all       = np.zeros((H_int, W_int), dtype=np.int32)
+        self.visit_counts_has_key   = np.zeros((2, H_int, W_int), dtype=np.int32)   
+        self.visit_counts_dooropen  = np.zeros((2, H_int, W_int), dtype=np.int32)   
+        self.visit_counts_joint     = np.zeros((2, 2, H_int, W_int), dtype=np.int32)
 
-        # plot scales
-        self.POS_SCALE, self.DIR_SCALE, self.EVENT_SCALE = 80.0, 20.0, 5.0
-
+        self.POS_SCALE = 80.0
+        self.DIR_SCALE = 20.0
+        self.EVENT_SCALE = 5.0
 
     def _door_ahead(self, base=None):
         from minigrid.core.world_object import Door
@@ -148,49 +152,24 @@ class DQN_CFNAgent:
 
 
     def cfn_compact_obs(self, base=None) -> np.ndarray:
-        
         b = self.env.unwrapped if base is None else base
+        H, W = b.grid.height - 2, b.grid.width - 2
+        ax, ay = map(int, b.agent_pos)
+        ax_f = (ax - 1) / max(W - 1, 1)
+        ay_f = (ay - 1) / max(H - 1, 1)
 
-        # Sanity: env size should match the layout we baked into cfn_state_dim
-        H_in = b.grid.height - 2
-        W_in = b.grid.width  - 2
-        if (H_in != self._cfn_H_in) or (W_in != self._cfn_W_in):
-            raise ValueError(
-                f"CFN obs size mismatch: env interior ({H_in}x{W_in}) "
-                f"!= initialized ({self._cfn_H_in}x{self._cfn_W_in})."
-            )
-
-        # --- position one-hot (interior indexing) ---
-        ax, ay = map(int, b.agent_pos)    # 1..W-2 / 1..H-2 in env coords
-        xi = ax - 1                       # 0..W_in-1
-        yi = ay - 1                       # 0..H_in-1
-        pos_idx = yi * self._cfn_W_in + xi
-
-        pos_oh = np.zeros(self._cfn_pos_dim, dtype=np.float32)
-        if 0 <= pos_idx < self._cfn_pos_dim:
-            pos_oh[pos_idx] = 1.0
-
-        # --- direction one-hot (0..3) ---
         d = int(getattr(b, "agent_dir", 0)) % 4
-        dir_oh = np.zeros(self._cfn_dir_dim, dtype=np.float32)
-        dir_oh[d] = 1.0
+        dir_onehot = np.zeros(4, dtype=np.float32); dir_onehot[d] = 1.0
 
-        # --- binary flags as one-hot(2) each ---
-        hk = int(self._has_key(b))                # 0/1
-        do = int(self._door_ahead_open(b))        # 0/1
-        km = int(self._key_matches_door_ahead(b)) # 0/1
+        has_key_f    = float(self._has_key(b))
+        door_open_f  = float(self._door_ahead_open(b))
+        key_match_f  = float(self._key_matches_door_ahead(b))
 
-        def bin_one_hot(v: int) -> np.ndarray:
-            out = np.zeros(self._cfn_flag_dim, dtype=np.float32)
-            out[min(max(v, 0), 1)] = 1.0
-            return out
-
-        has_key_oh   = bin_one_hot(hk)
-        door_open_oh = bin_one_hot(do)
-        key_match_oh = bin_one_hot(km)
-
-        # Concatenate all one-hot parts
-        return np.concatenate([pos_oh, dir_oh, has_key_oh, door_open_oh, key_match_oh], axis=0)
+        return np.concatenate([
+            np.array([ax_f, ay_f], dtype=np.float32),
+            dir_onehot,
+            np.array([has_key_f, door_open_f, key_match_f], dtype=np.float32)
+        ], axis=0)
 
 
     def process_obs(self, obs_raw, env_for_pose=None):
@@ -201,16 +180,18 @@ class DQN_CFNAgent:
         t = img[..., 0].clip(0, self.N_TYPE-1)
         c = img[..., 1].clip(0, self.N_COLOR-1)
         s = img[..., 2].clip(0, self.N_STATE-1)
-        oh_t = self._eye_type[t]      
-        oh_c = self._eye_color[c]     
-        oh_s = self._eye_state[s]     
+        oh_t = self._eye_type[t]      # (H,W,11)
+        oh_c = self._eye_color[c]     # (H,W, 6)
+        oh_s = self._eye_state[s]     # (H,W, 4)
         cell_feats = np.concatenate([oh_t, oh_c, oh_s], axis=-1).reshape(-1).astype(np.float32)  # (H*W*21,)
 
         # agent pose from the right env
         env0 = env_for_pose if env_for_pose is not None else self.env
         ax, ay = map(int, env0.unwrapped.agent_pos)  # 1..W-2 / 1..H-2
-        ax_f = ax / (W-1)                            # normalize to [0,1]
-        ay_f = ay / (H-1)
+        
+        H_img, W_img = img.shape[:2]
+        ax_f = (ax - 1) / max((W_img - 2), 1)
+        ay_f = (ay - 1) / max((H_img - 2), 1)
 
         d = int(getattr(env0.unwrapped, "agent_dir", 0))  # 0..3
         dir_onehot = np.zeros(4, dtype=np.float32); dir_onehot[d] = 1.0
@@ -362,14 +343,7 @@ class DQN_CFNAgent:
             if current_timestep % 10_000 == 0 and current_timestep > 0:
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=0.0)
             if current_timestep % 5000 == 0 or current_timestep == 10:
-                plot_rnd_intrinsic_three_panels_agg(
-                    self,
-                    door_pos=(12, 7),
-                    key_pos=(9, 1),
-                    agg="mean",
-                    step=current_timestep
-                )
-
+                plot_rnd_intrinsic_three_panels_agg(self, agg="mean", step=current_timestep)
 
 
     def update_q(self, batch, step):
@@ -426,34 +400,39 @@ class DQN_CFNAgent:
         if self.step_count % 10000 == 0:
             wandb.log({"training/cfn_loss": float(cfn_loss.item())}, step=step)
 
-def plot_rnd_intrinsic_three_panels_agg(
-    agent,
-    door_pos,        # (x_d, y_d) in env coords (with walls)
-    key_pos,         # (x_k, y_k) in env coords
-    agg="max",       # "max" or "mean" over directions
-    step=None
-):
-    """
-    Single key-door setup:
-      - Door color = 'blue'
-      - Key color  = 'blue'
-      - No scanning for objects; only uses provided positions.
-      - For each config, sets door/key state, then sweeps all interior cells,
-        aggregating CFN bonus across 4 directions (max/mean).
-    """
+
+def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=None):
+    
     import numpy as np
     import matplotlib.pyplot as plt
     import torch
     from minigrid.core.world_object import Door, Key
 
+    # ---------- helpers ----------
+    def _find_primary_door(b):
+        H, W = b.grid.height, b.grid.width
+        primary = None
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                obj = b.grid.get(x, y)
+                if isinstance(obj, Door):
+                    if primary is None:
+                        primary = (x, y, obj)
+                    # Prefer a locked door if present
+                    if getattr(obj, "is_locked", False):
+                        return (x, y, obj)
+        return primary
+
+    def _remove_keys_of_color(b, color: str):
+        H, W = b.grid.height, b.grid.width
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                obj = b.grid.get(x, y)
+                if isinstance(obj, Key) and getattr(obj, "color", None) == color:
+                    b.grid.set(x, y, None)
+
     base = agent.eval_env.unwrapped
     H_in, W_in = base.grid.height - 2, base.grid.width - 2
-
-    # sanity
-    if door_pos is None or key_pos is None:
-        raise ValueError("Provide door_pos and key_pos explicitly for the single-blue setup.")
-
-    BLUE = "blue"
 
     configs = [
         ("Closed, no key", dict(door_open=False, has_key=False)),
@@ -461,53 +440,53 @@ def plot_rnd_intrinsic_three_panels_agg(
         ("Open, has key",   dict(door_open=True,  has_key=True)),
     ]
 
-    def _set_door(b, pos, is_open: bool):
-        x, y = pos
-        door = Door(BLUE)
-        door.is_open = bool(is_open)
-        door.is_locked = not door.is_open
-        b.grid.set(x, y, door)
-
-    def _place_key(b, pos):
-        x, y = pos
-        b.grid.set(x, y, Key(BLUE))
-
-    def _clear_key(b, pos):
-        x, y = pos
-        if isinstance(b.grid.get(x, y), Key):
-            b.grid.set(x, y, None)
-
     maps, vmin, vmax = [], +1e9, -1e9
 
-    # freeze CFN stats while sweeping
+
     was_training = getattr(agent.cfn, "training", None)
     agent.cfn.eval()
-
     with torch.no_grad():
         for _, cfg in configs:
             agent.eval_env.reset()
-            b = agent.eval_env.unwrapped
+            base = agent.eval_env.unwrapped
 
-            # door state (always blue at door_pos)
-            _set_door(b, door_pos, is_open=cfg["door_open"])
+            # Door setup
+            pd = _find_primary_door(base)
+            pd_pos, pd_color = None, None
+            if pd is not None:
+                x_d, y_d, door_obj = pd
+                pd_pos = (x_d, y_d)
+                pd_color = getattr(door_obj, "color", None)
 
-            # key/agent carrying state (always blue at key_pos)
+            # Key / carrying setup
+            base.carrying = None
             if cfg["has_key"]:
-                b.carrying = Key(BLUE)
-                _clear_key(b, key_pos)
-            else:
-                b.carrying = None
-                _place_key(b, key_pos)
+                key_color = pd_color if pd_color is not None else "yellow"
+                base.carrying = Key(key_color)
+                _remove_keys_of_color(base, key_color)
 
-            # sweep interior cells; aggregate across 4 dirs
+            # Door open/closed
+            if pd_pos is not None:
+                x_d, y_d = pd_pos
+                obj = base.grid.get(x_d, y_d)
+                if isinstance(obj, Door):
+                    obj.is_open = bool(cfg["door_open"])
+                    obj.is_locked = not obj.is_open
+                    base.grid.set(x_d, y_d, obj)
+
+            # Sweep over all interior cells and 4 orientations; aggregate across dirs
             M_dir = np.empty((4, H_in, W_in), dtype=np.float32)
             for d in range(4):
                 for yy in range(H_in):
                     for xx in range(W_in):
-                        b.agent_pos = (xx + 1, yy + 1)
-                        b.agent_dir = d
-                        cfn_vec = agent.cfn_compact_obs(b)
-                        raw, _ = agent.cfn_raw_pseudocount(cfn_vec, update_prior=False)
+                        # place agent
+                        base.agent_pos = (xx + 1, yy + 1)
+                        base.agent_dir = d
+
+                        # CFN compact state for this pose/world
+                        cfn_vec = agent.cfn_compact_obs(base)
+                        # CFN "raw" intrinsic (same as cfn_bonus_now uses internally)
+                        raw, pseudo = agent.cfn_raw_pseudocount(cfn_vec, update_prior=False)
                         M_dir[d, yy, xx] = float(raw)
 
             M = np.nanmax(M_dir, axis=0) if agg == "max" else np.nanmean(M_dir, axis=0)
@@ -516,7 +495,6 @@ def plot_rnd_intrinsic_three_panels_agg(
                 vmin = min(vmin, float(np.nanmin(M)))
                 vmax = max(vmax, float(np.nanmax(M)))
 
-    # restore CFN mode
     if was_training is True:
         agent.cfn.train()
     elif was_training is False:
@@ -543,7 +521,7 @@ def plot_rnd_intrinsic_three_panels_agg(
         ax.set_title(f"{title} ({agg} over dir)", fontsize=12, pad=6)
         ax.set_xticks(range(W_in)); ax.set_yticks(range(H_in))
 
-        # optional visit-count overlay
+        # Optional visit-count overlay if shapes match
         if isinstance(counts, np.ndarray) and counts.shape == (H_in, W_in):
             for yy in range(H_in):
                 for xx in range(W_in):
@@ -553,29 +531,35 @@ def plot_rnd_intrinsic_three_panels_agg(
     cb = fig.colorbar(last_im, cax=cax)
     cb.set_label("CFN intrinsic (raw norm)", labelpad=6)
 
+    
     if step is not None:
-        import wandb as _wandb
-        _wandb.log({f"heatmap/cfn_intrinsic_three_panels_{agg}": _wandb.Image(fig)}, step=step)
-
-    # Optional scatter vs. 1/sqrt(count) (using the first panel)
-    if isinstance(counts, np.ndarray) and counts.shape == (H_in, W_in) and len(maps) > 0:
-        M0 = maps[0]
+        wandb.log(
+            {f"heatmap/cfn_intrinsic_three_panels_{agg}": wandb.Image(fig)},
+            step=step
+        )
+    if isinstance(counts, np.ndarray) and counts.shape == (H_in, W_in):
         with np.errstate(divide="ignore", invalid="ignore"):
-            X = 1.0 / np.sqrt(counts.astype(np.float32))
-        mask = (counts > 0) & np.isfinite(X) & np.isfinite(M0)
-        Xv = X[mask].ravel()
-        Yv = M0[mask].ravel()
-        if Xv.size > 600:
-            idx = np.random.choice(Xv.size, size=600, replace=False)
-            Xv, Yv = Xv[idx], Yv[idx]
+            true_inv_sqrt = 1.0 / np.sqrt(counts.astype(np.float32))
+
+        # mask out zero-visit and non-finite
+        mask = (counts > 0) & np.isfinite(true_inv_sqrt) & np.isfinite(M)
+        X = true_inv_sqrt[mask].ravel()
+        Y = M[mask].ravel()
+
+        # optional subsample to keep the plot clean
+        if X.size > 600:
+            idx = np.random.choice(X.size, size=600, replace=False)
+            X, Y = X[idx], Y[idx]
+
+        # make the scatter (match your example)
         fig_sc, ax_sc = plt.subplots(figsize=(6, 6), dpi=150)
-        ax_sc.scatter(Xv, Yv, s=18, alpha=0.85)
+        ax_sc.scatter(X, Y, s=18, alpha=0.85)
         ax_sc.set_xlabel("True Bonus  (1 / sqrt(count))")
-        ax_sc.set_ylabel("Approx Bonus  (CFN)")
-        ax_sc.set_title("True vs. Approx Bonus (panel: Closed, no key)")
-        if step is not None:
-            import wandb as _wandb
-            _wandb.log({f"scatter/true_vs_approx": _wandb.Image(fig_sc)}, step=step)
+        ax_sc.set_ylabel("Approx Bonus  (CFN )")
+        ax_sc.set_title("True vs. Approx Bonus")
+
+        if wandb is not None and step is not None:
+            wandb.log({f"scatter/true_vs_approx": wandb.Image(fig_sc)}, step=step)
         plt.close(fig_sc)
 
     plt.close(fig)
@@ -667,7 +651,11 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval-flat", num_episodes=10,
 
 
 def main():
-    wandb.init(project="dqn", name="cfn")
+    run = wandb.init(project="dqn", name="cfn", reinit=True)
+
+    code_art = wandb.Artifact(f"code-{wandb.run.id}", type="code")
+    this_file = pathlib.Path(__file__).resolve()
+    code_art.add_file(str(this_file), name=this_file.name)
 
     total_timesteps   = 1_000_000
     max_episode_steps = 1600
@@ -761,4 +749,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

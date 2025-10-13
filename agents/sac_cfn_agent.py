@@ -68,7 +68,7 @@ class SACCFNAgent(SACAgent):
 
             next_obs_np, reward, terminated, truncated, info = self.env.step(action)
 
-            reward -= (info["reward_ctrl"] + info["reward_near"])
+            # reward -= (info["reward_ctrl"] + info["reward_near"])
 
             # if current_timestep < 25_000:
             #     reward -= info["reward_ctrl"]
@@ -100,7 +100,7 @@ class SACCFNAgent(SACAgent):
                     prior_out = self.cfn.prior(obs)
                     output_norm = combined_out.norm(p=2, dim=1)
                     prior_output_norm = prior_out.norm(p=2, dim=1)
-                    pseudocount_estimate = self.cfn.coin_flip_dim / (output_norm ** 2)
+                    pseudocount_estimate = self.coin_flip_dim / (output_norm ** 2)
 
                     wandb.log({
                         "pseudocounts-intr": 1 / (intrinsic_reward ** 2 + 1e-8).item(),

@@ -6,7 +6,7 @@ import hydra
 import wandb
 from omegaconf import DictConfig
 
-from agents.dqn_cfn import DQN_CFNAgent
+# from agents.dqn_cfn import DQN_CFNAgent
 from agents.sac_agent import SACAgent
 from agents.sac_cfn_agent import SACCFNAgent
 from agents.sac_cfn_discrete import SACCFNAgentDiscrete
@@ -130,13 +130,14 @@ def create_agent(cfg: DictConfig, env):
             )
 
     elif agent_id == "dqn_agent":
-        if use_cfn:
-            agent = DQN_CFNAgent(
-                env=env,
-                eval_env=eval_env,
-                dqn_cfg=cfg.agent,
-                cfn_cfg=cfg.cfn
-            )
+        a = 1
+        # if use_cfn:
+        #     agent = DQN_CFNAgent(
+        #         env=env,
+        #         eval_env=eval_env,
+        #         dqn_cfg=cfg.agent,
+        #         cfn_cfg=cfg.cfn
+        #     )
 
     else:
         raise ValueError(f"Unsupported agent id: {agent_id}")

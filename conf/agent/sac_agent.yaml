@@ -3,11 +3,11 @@ lr: 3e-4 #3e-4 #0.001 #0.00005
 batch_size: 128 #32 #128
 replay_buffer_size: 1_500_000 # 100
 tau: 0.005
-num_env_steps: 100_000 #300000
+num_env_steps: 500_000 #300000
 discount_factor: 0.99
 target_entropy: -4.0
 max_steps: 1000
 checkpoint_frequency: 10
-cfn: True
+cfn: False
 rnd: False
-mrl: False
+mrl: True
