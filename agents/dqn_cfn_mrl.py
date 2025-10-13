@@ -36,44 +36,43 @@ class CFN_MRL_DQNAgent(DQN_CFNAgent):
 
     def update_q(self, batch, step):
         # Convert batch data to tensors
-        obs = torch.from_numpy(batch["obs"]).float().to(self.device)                 # (B, D)
-        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)       # (B, D)
-        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)      # (B,)
-        ext = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)     # (B,)
-        intr = torch.from_numpy(batch["intr"].squeeze(-1)).float().to(self.device)   # (B,)
-        term = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)   # (B,)
+        obs = torch.from_numpy(batch["obs"]).float().to(self.device)                 
+        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)       
+        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)      
+        ext = torch.from_numpy(batch["rew"].squeeze(-1)).float().to(self.device)    
+        intr = torch.from_numpy(batch["intr"].squeeze(-1)).float().to(self.device)   
+        term = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)   
         timeout = torch.from_numpy(batch["timeout"].squeeze(-1)).float().to(self.device)
 
-        # Munchausen reward shaping
-        base_reward = self.ext_coef * ext + self.int_coef * self.lambda_bonus * intr  # (B,)
+        base_reward = self.ext_coef * ext + self.int_coef * self.lambda_bonus * intr  
 
         # Q-value for current state-action pairs
-        q_s_online = self.q_net(obs)                          # (B, A)
-        q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)  # (B,)
+        q_s_online = self.q_net(obs)                          
+        q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)  
 
         with torch.no_grad():
             # Log-policy terms for Munchausen update
             v_s = q_s_online.max(1, keepdim=True)[0]
             logsum_s = torch.logsumexp((q_s_online - v_s) / self.tau, dim=1, keepdim=True)
-            log_pi_s = q_s_online - v_s - self.tau * logsum_s                        # (B, A)
-            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)             # (B,)
+            log_pi_s = q_s_online - v_s - self.tau * logsum_s                        
+            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)             
             log_pi_sa = torch.clamp(log_pi_sa, min=self.lo, max=0.0)
 
-        munchausen_reward = base_reward + self.alpha_m * log_pi_sa                  # (B,)
+        munchausen_reward = base_reward + self.alpha_m * log_pi_sa                  
 
         with torch.no_grad():
             # Next state value estimation using soft backup
-            q_sp_online = self.q_net(next_obs)                                       # (B, A)
+            q_sp_online = self.q_net(next_obs)                                       
             v_sp_on = q_sp_online.max(1, keepdim=True)[0]
             logsum_sp = torch.logsumexp((q_sp_online - v_sp_on) / self.tau, dim=1, keepdim=True)
-            log_pi_sp = q_sp_online - v_sp_on - self.tau * logsum_sp                # (B, A)
-            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                         # (B, A)
+            log_pi_sp = q_sp_online - v_sp_on - self.tau * logsum_sp                
+            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                         
 
-            q_sp_target = self.target_q_net(next_obs)                                # (B, A)
-            soft_backup = (pi_sp * (q_sp_target - self.tau * log_pi_sp)).sum(dim=1)  # (B,)
+            q_sp_target = self.target_q_net(next_obs)                                
+            soft_backup = (pi_sp * (q_sp_target - self.tau * log_pi_sp)).sum(dim=1)  
 
             bootstrap_mask = 1.0 - term
-            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup  # (B,)
+            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup  
 
         # Compute loss and update parameters
         loss = F.smooth_l1_loss(q_sa, target)
@@ -158,7 +157,7 @@ def main():
         alpha_m=0.3,      
         lo=-1.0,           
         ext_coef=2.0,      
-        int_coef=1.0,      # no cfn
+        int_coef=1.0,      
         grad_clip=10.0,    
     )
 

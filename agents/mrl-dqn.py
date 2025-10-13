@@ -3,7 +3,6 @@ import os
 
 from matplotlib import pyplot as plt
 
-# --- removed: RND imports ---
 # from RND.rnd import RNDModel, RewardForwardFilter
 from agents.dqn_cfn import evaluate_dqn
 from utils.validate import validate_dqn
@@ -26,7 +25,6 @@ from networks.ddqn import DDQN
 from utils.stats import EpisodeStats
 import logging
 from cpprb import ReplayBuffer
-# --- removed: RunningMeanStd from gymnasium.wrappers.utils ---
 from minigrid.wrappers import FullyObsWrapper
 
 logging.basicConfig(
@@ -58,12 +56,11 @@ class DQN_MRL_Agent:
         # Munchausen hyperparams
         self.tau = float(mrl_cfg.tau)           # entropy temperature
         self.alpha_m = float(mrl_cfg.alpha_m)   # Munchausen coefficient
-        self.lo = float(mrl_cfg.lo)             # clipping lower bound for log π
+        self.lo = float(mrl_cfg.lo)             # clipping lower bound for log pi
         self.extrinsic_coef = float(getattr(mrl_cfg, "extrinsic_coef", 1.0))  # for logging/return scale only
 
         act_dim = env.action_space.n
 
-        # --- your symbolic full-grid → vector encoding stays the same ---
         H_all = self.env.unwrapped.grid.height
         W_all = self.env.unwrapped.grid.width
         H_in, W_in = H_all - 2, W_all - 2
@@ -98,7 +95,6 @@ class DQN_MRL_Agent:
             },
         )
 
-    # ---------- encoding stays unchanged ----------
     def process_obs(self, obs_raw, env_for_pose=None):
         img_full = np.asarray(obs_raw["image"], dtype=np.int16)
         img = img_full[1:-1, 1:-1, :]
@@ -128,7 +124,6 @@ class DQN_MRL_Agent:
         x, y = map(int, self.env.unwrapped.agent_pos)
         self.visit_counts[(y - 1), (x - 1)] += 1
 
-    # ---------- epsilon-greedy ----------
     def act(self, obs, epsilon):
         obs_t = torch.from_numpy(obs).to(self.device).float() if isinstance(obs, np.ndarray) else obs.to(self.device).float()
         if obs_t.dim() == 1:
@@ -145,7 +140,6 @@ class DQN_MRL_Agent:
                 greedy[mask] = np.random.randint(0, self.env.action_space.n, size=mask.sum())
         return int(greedy[0]) if greedy.shape[0] == 1 else greedy
 
-    # ---------- training loop (no RND warmup, no intrinsic) ----------
     def train(self, total_timesteps, max_episode_steps, epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.99999671):
         current_timestep = 0
         episode_return = 0.0
@@ -235,37 +229,37 @@ class DQN_MRL_Agent:
 
 
     def update_dqn(self, batch):
-        obs = torch.from_numpy(batch["obs"]).float().to(self.device)                 # (B, D)
-        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)       # (B, D)
-        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)      # (B,)
-        ext = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(self.device)     # (B,)
-        term = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)   # (B,)
+        obs = torch.from_numpy(batch["obs"]).float().to(self.device)                
+        next_obs = torch.from_numpy(batch["next_obs"]).float().to(self.device)       
+        act = torch.from_numpy(batch["act"].squeeze(-1)).long().to(self.device)      
+        ext = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(self.device)     
+        term = torch.from_numpy(batch["term"].squeeze(-1)).float().to(self.device)   
         timeout = torch.from_numpy(batch["timeout"].squeeze(-1)).float().to(self.device)
 
-        q_s_online = self.q_net(obs)                         # (B, A)
+        q_s_online = self.q_net(obs)                        
         q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
             v_s = q_s_online.max(1, keepdim=True)[0]
             logsum_s = torch.logsumexp((q_s_online - v_s) / self.tau, dim=1, keepdim=True)
-            log_pi_s = q_s_online - v_s - self.tau * logsum_s                 # (B, A)
-            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)       # (B,)
+            log_pi_s = q_s_online - v_s - self.tau * logsum_s                 
+            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)      
             log_pi_sa = torch.clamp(log_pi_sa, min=self.lo, max=0.0)
-        munchausen_reward = ext + self.alpha_m * log_pi_sa                    # (B,)
+        munchausen_reward = ext + self.alpha_m * log_pi_sa                    
 
         with torch.no_grad():
-            q_sp_online = self.q_net(next_obs)                                # (B, A)
+            q_sp_online = self.q_net(next_obs)                               
             v_sp_on = q_sp_online.max(1, keepdim=True)[0]
             logsum_sp = torch.logsumexp((q_sp_online - v_sp_on) / self.tau, dim=1, keepdim=True)
-            log_pi_sp = q_sp_online - v_sp_on - self.tau * logsum_sp          # (B, A)
-            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                  # (B, A)
+            log_pi_sp = q_sp_online - v_sp_on - self.tau * logsum_sp          
+            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                  
 
-            q_sp_target = self.target_q_net(next_obs)                         # (B, A)
-            soft_backup = (pi_sp * (q_sp_target - self.tau * log_pi_sp)).sum(dim=1)  # (B,)
+            q_sp_target = self.target_q_net(next_obs)                        
+            soft_backup = (pi_sp * (q_sp_target - self.tau * log_pi_sp)).sum(dim=1)  
 
             bootstrap_mask = 1.0 - term
 
-            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup   # (B,)
+            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup   
 
         loss = F.smooth_l1_loss(q_sa, target)
 
@@ -315,7 +309,6 @@ def main():
         max_episode_steps=max_episode_steps,
     )
 
-    # ----- configs -----
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 512,
         "lr": 2.5e-4,
@@ -331,7 +324,7 @@ def main():
     mrl_cfg = type("MRLConfig", (), {
         "tau": 0.06,          # entropy temperature
         "alpha_m": 0.3,       # Munchausen coefficient
-        "lo": -1.0,           # clip lower bound for log π
+        "lo": -1.0,           # clip lower bound for log p
         "extrinsic_coef": 1.0 
     })
 

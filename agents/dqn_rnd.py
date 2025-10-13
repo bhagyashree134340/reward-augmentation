@@ -130,12 +130,12 @@ class DQN_RNDAgent:
         else:
             obs_t = obs.to(self.device).float()
         if obs_t.dim() == 1:
-            obs_t = obs_t.unsqueeze(0)            # (1, D)
+            obs_t = obs_t.unsqueeze(0)            
 
         with torch.no_grad():
-            q = self.q_net(obs_t)                 # (B, A)
+            q = self.q_net(obs_t)                 
 
-        greedy = q.argmax(dim=1).cpu().numpy().astype(int)  # (B,)
+        greedy = q.argmax(dim=1).cpu().numpy().astype(int)  
 
         if epsilon > 0.0:
             B = greedy.shape[0]
@@ -410,12 +410,11 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
                 if isinstance(obj, Key) and getattr(obj, "color", None) == color:
                     b.grid.set(x, y, None)
 
-    # ---------------- env setup ----------------
 
     base = agent.eval_env.unwrapped
     H_in, W_in = base.grid.height - 2, base.grid.width - 2  # interior only
 
-    # normalization (do NOT update RMS here)
+    # normalization 
     use_norm = normalized and hasattr(agent, "reward_rms") and hasattr(agent.reward_rms, "var")
     denom = None
     if use_norm:
@@ -424,7 +423,6 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
         except Exception:
             use_norm, denom = False, None
 
-    # optional sanity check for obs dim
     expected_dim = None
     if hasattr(agent, "obs_mean"):
         try:
@@ -432,7 +430,7 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
         except Exception:
             expected_dim = None
 
-    # Panels (we’ll fill in actual door color at runtime)
+
     configs = [
         ("Closed, no key", dict(door_open=False, has_key=False)),
         ("Closed, has key", dict(door_open=False, has_key=True)),
@@ -441,9 +439,7 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
 
     maps, vmin, vmax = [], +1e9, -1e9
 
-    # ---------------- compute heatmaps ----------------
     for _, cfg in configs:
-        # IMPORTANT: reset the *top-level* env so any wrappers (e.g. patchers) run
         agent.eval_env.reset()
         base = agent.eval_env.unwrapped
 
@@ -501,7 +497,6 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
             vmin = min(vmin, float(np.nanmin(M)))
             vmax = max(vmax, float(np.nanmax(M)))
 
-    # ---------------- plot ----------------
     fig, axs = plt.subplots(1, 4, figsize=(28, 9), dpi=200,
                             gridspec_kw={"width_ratios": [1, 1, 1, 0.04]})
     cax = axs[3]

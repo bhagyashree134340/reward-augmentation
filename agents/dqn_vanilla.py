@@ -18,7 +18,7 @@ from utils.evaluate import evaluate_dqn
 from utils.stats import EpisodeStats
 import logging
 from minigrid.wrappers import FullyObsWrapper, ImgObsWrapper, RGBImgObsWrapper
-from cpprb import ReplayBuffer  # <-- NEW
+from cpprb import ReplayBuffer  
 
 log = logging.getLogger(__name__)
 
@@ -43,25 +43,21 @@ class DQNAgent:
         self.batch_size = cfg.batch_size
         self.target_update_freq = cfg.target_update_freq
 
-        ## --- inside __init__ right before building env_dict ---
         C, H, W = map(int, self.obs_shape_torch)   # ensure python ints
 
         env_dict = {
             "obs":      {"shape": (C, H, W), "dtype": np.uint8},
             "next_obs": {"shape": (C, H, W), "dtype": np.uint8},
-            # for scalars, either omit shape or set to (1,)
             "act":      {"dtype": np.int64},
             "rew":      {"dtype": np.float32},
             "done":     {"dtype": np.bool_},
         }
 
-        # !!! cast capacity to int to avoid numpy.float64 sneaking in
         self.replay_buffer = ReplayBuffer(int(cfg.replay_buffer_size), env_dict)
 
     def process_obs(self, obs):
         if isinstance(obs, dict) and 'image' in obs:
             obs = obs['image']
-        # keep as uint8 (C,H,W)
         return np.transpose(np.asarray(obs, dtype=np.uint8), (2, 0, 1))
 
     def act(self, obs, epsilon):
@@ -101,11 +97,9 @@ class DQNAgent:
     def sample_from_rb(self, batch_size):
         batch = self.replay_buffer.sample(batch_size)
 
-        # Images: uint8 -> float32 in [0,1]
         obs = torch.as_tensor(batch["obs"], dtype=torch.float32, device=self.device) / 255.0
         next_obs = torch.as_tensor(batch["next_obs"], dtype=torch.float32, device=self.device) / 255.0
 
-        # Scalars may come as (N,1); squeeze last axis if present
         def _to_1d(x):
             x = np.asarray(x)
             return x.squeeze(-1) if x.ndim == 2 and x.shape[-1] == 1 else x
@@ -142,11 +136,9 @@ class DQNAgent:
             if reward > 0:
                 wandb.log({"reward": reward}, step=current_timestep)
 
-            # ---- cpprb add (obs stored as uint8) ----
             self.replay_buffer.add(
                 obs=obs, act=action, rew=reward, next_obs=next_obs, done=done
             )
-            # -----------------------------------------
 
             if current_timestep >= learning_starts and self.replay_buffer.get_stored_size() >= self.batch_size:
 

@@ -43,10 +43,7 @@ class DQN_CFNAgent:
             self.obs_shape_hw_c = obs_space.shape
         self.obs_shape = (self.obs_shape_hw_c[2], self.obs_shape_hw_c[0], self.obs_shape_hw_c[1])
         self.act_dim = self.env.action_space.n
-        # H, W from obs space
-        # self.state_dim = H*W*self.FEAT_PER_CELL + 2 + 4  # cells + (ax,ay) + dir one-hot
-
-
+        
         # From FullyObsWrapper:
         H, W, _ = self.env.observation_space["image"].shape
 
@@ -56,16 +53,14 @@ class DQN_CFNAgent:
 
         self.cfn_state_dim = 9  
 
-        # One-hot caches (fast vectorized lookups)
+        # One-hot caches
         self._eye_type  = np.eye(self.N_TYPE,  dtype=np.float32)
         self._eye_color = np.eye(self.N_COLOR, dtype=np.float32)
         self._eye_state = np.eye(self.N_STATE, dtype=np.float32)
 
-        # Precompute agent one-hot bases for speed (optional)
         self._agent_eye = np.eye(H*W, dtype=np.uint8).reshape(H*W, H, W)
 
-        # New state dim: cell one-hots + agent pos one-hot + dir(sin,cos)
-        # New state dim: cells + agent-pos one-hot + dir one-hot(4)
+       
         self.state_dim = H*W*self.FEAT_PER_CELL + 2 + 4
 
 
@@ -173,27 +168,27 @@ class DQN_CFNAgent:
 
 
     def process_obs(self, obs_raw, env_for_pose=None):
-        img = np.asarray(obs_raw["image"], dtype=np.int16)   # (H,W,3)
+        img = np.asarray(obs_raw["image"], dtype=np.int16)   
         H, W = img.shape[:2]
 
         # per-cell one-hot (21 features/cell)
         t = img[..., 0].clip(0, self.N_TYPE-1)
         c = img[..., 1].clip(0, self.N_COLOR-1)
         s = img[..., 2].clip(0, self.N_STATE-1)
-        oh_t = self._eye_type[t]      # (H,W,11)
-        oh_c = self._eye_color[c]     # (H,W, 6)
-        oh_s = self._eye_state[s]     # (H,W, 4)
-        cell_feats = np.concatenate([oh_t, oh_c, oh_s], axis=-1).reshape(-1).astype(np.float32)  # (H*W*21,)
+        oh_t = self._eye_type[t]      
+        oh_c = self._eye_color[c]     
+        oh_s = self._eye_state[s]     
+        cell_feats = np.concatenate([oh_t, oh_c, oh_s], axis=-1).reshape(-1).astype(np.float32)  
 
         # agent pose from the right env
         env0 = env_for_pose if env_for_pose is not None else self.env
-        ax, ay = map(int, env0.unwrapped.agent_pos)  # 1..W-2 / 1..H-2
+        ax, ay = map(int, env0.unwrapped.agent_pos) 
         
         H_img, W_img = img.shape[:2]
         ax_f = (ax - 1) / max((W_img - 2), 1)
         ay_f = (ay - 1) / max((H_img - 2), 1)
 
-        d = int(getattr(env0.unwrapped, "agent_dir", 0))  # 0..3
+        d = int(getattr(env0.unwrapped, "agent_dir", 0))  
         dir_onehot = np.zeros(4, dtype=np.float32); dir_onehot[d] = 1.0
 
         return np.concatenate([cell_feats, np.array([ax_f, ay_f], np.float32), dir_onehot], 0)
@@ -224,8 +219,8 @@ class DQN_CFNAgent:
         if not (0 <= x < W and 0 <= y < H):
             return
 
-        hk = self._has_key(base)              # int 0/1
-        do = self._door_ahead_open(base)      # int 0/1
+        hk = self._has_key(base)             
+        do = self._door_ahead_open(base)      
 
         self.visit_counts[y, x] += 1
         self.visit_counts_all[y, x] += 1
@@ -390,7 +385,7 @@ class DQN_CFNAgent:
 
 
     def update_cfn(self, obs_batch, coin_flip_batch, step):
-        obs_tensor  = obs_batch.detach().clone().to(self.device).float()      # shape: (B, 9)
+        obs_tensor  = obs_batch.detach().clone().to(self.device).float()      
         coin_tensor = coin_flip_batch.detach().clone().to(self.device).float()
         pred = self.cfn(obs_tensor, update_prior_stats=False)
         cfn_loss = F.mse_loss(pred, coin_tensor)
@@ -408,7 +403,7 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
     import torch
     from minigrid.core.world_object import Door, Key
 
-    # ---------- helpers ----------
+
     def _find_primary_door(b):
         H, W = b.grid.height, b.grid.width
         primary = None
@@ -418,7 +413,6 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
                 if isinstance(obj, Door):
                     if primary is None:
                         primary = (x, y, obj)
-                    # Prefer a locked door if present
                     if getattr(obj, "is_locked", False):
                         return (x, y, obj)
         return primary
@@ -500,7 +494,7 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
     elif was_training is False:
         agent.cfn.eval()
 
-    # ---------- plot ----------
+ 
     fig, axs = plt.subplots(1, 4, figsize=(28, 9), dpi=200,
                             gridspec_kw={"width_ratios": [1, 1, 1, 0.04]})
     cax = axs[3]
@@ -521,7 +515,7 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
         ax.set_title(f"{title} ({agg} over dir)", fontsize=12, pad=6)
         ax.set_xticks(range(W_in)); ax.set_yticks(range(H_in))
 
-        # Optional visit-count overlay if shapes match
+        
         if isinstance(counts, np.ndarray) and counts.shape == (H_in, W_in):
             for yy in range(H_in):
                 for xx in range(W_in):
@@ -546,12 +540,12 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
         X = true_inv_sqrt[mask].ravel()
         Y = M[mask].ravel()
 
-        # optional subsample to keep the plot clean
+        # subsample to keep the plot clean
         if X.size > 600:
             idx = np.random.choice(X.size, size=600, replace=False)
             X, Y = X[idx], Y[idx]
 
-        # make the scatter (match your example)
+        # make the scatter
         fig_sc, ax_sc = plt.subplots(figsize=(6, 6), dpi=150)
         ax_sc.scatter(X, Y, s=18, alpha=0.85)
         ax_sc.set_xlabel("True Bonus  (1 / sqrt(count))")

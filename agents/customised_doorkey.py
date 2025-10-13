@@ -24,13 +24,13 @@ class PatchGridWrapper(Wrapper):
         wall_cells: Optional[Iterable[Tuple[int, int]]] = None,
         goal_cell: Optional[Tuple[int, int]] = None,
         use_env_coords: bool = True,
-        empty_cells: Optional[Iterable[Tuple[int, int]]] = None,  # NEW
+        empty_cells: Optional[Iterable[Tuple[int, int]]] = None,  
     ):
         super().__init__(env)
         self.wall_cells = list(wall_cells or [])
         self.goal_cell = goal_cell
         self.use_env_coords = use_env_coords
-        self.empty_cells = list(empty_cells or [])  # NEW
+        self.empty_cells = list(empty_cells or [])  
 
     def reset(self, **kwargs):
         _, info = self.env.reset(**kwargs)
@@ -54,17 +54,13 @@ class PatchGridWrapper(Wrapper):
     def _apply_patch(self):
         grid = self.unwrapped.grid
 
-        # First: force specific cells to be empty (punch out holes)
         for x, y in self.empty_cells:
             ex, ey = self._to_env(x, y)
             grid.set(ex, ey, None)
 
-        # Then: add any extra walls
         for x, y in self.wall_cells:
             ex, ey = self._to_env(x, y)
             grid.set(ex, ey, Wall())
-
-
 
 
 class NoDropWrapper(Wrapper):
@@ -198,7 +194,7 @@ def make_fixed_doorkey_env(
     overwrite_existing: bool = True,
     seed: Optional[int] = None,
     env_id: str = "Fixed-DoorKey-v0",
-    # --- NEW: holes to punch after generation ---
+    # --- holes to punch after generation ---
     empty_cells: Optional[List[Tuple[int, int]]] = None,
 ):
     env = gym.make(
@@ -219,13 +215,12 @@ def make_fixed_doorkey_env(
         highlight=False
     )
 
-    # Wire the patcher (now with empty_cells)
     if wall_cells is not None or goal_pos is not None or empty_cells is not None:
         env = PatchGridWrapper(
             env,
             wall_cells=list(wall_cells) if wall_cells is not None else None,
             goal_cell=tuple(goal_pos) if goal_pos is not None else None,
-            empty_cells=list(empty_cells) if empty_cells is not None else None,  # NEW
+            empty_cells=list(empty_cells) if empty_cells is not None else None,  
         )
 
     if use_fully_obs:
@@ -233,7 +228,7 @@ def make_fixed_doorkey_env(
     if use_no_drop:
         env = NoDropWrapper(env)
 
-    # Recolor / re-place primary objects post-hoc (unchanged) ...
+    # Recolor / re-place primary objects post-hoc
     base = env.unwrapped
     grid = base.grid
     def _set_cell(pos: Tuple[int, int], obj):
@@ -259,7 +254,7 @@ def make_fixed_doorkey_env(
                     print(f"[make_fixed_doorkey_env] Warning: door at {pos} is not on a Wall cell.")
             _set_cell(tuple(pos), Door(color=color, is_open=False, is_locked=bool(locked)))
 
-    # NEW: optional sanity warning for the PRIMARY door relative to the center wall
+    
     if ensure_door_in_wall and door_pos is not None:
         mid_x = size // 2
         if door_pos[0] != mid_x:

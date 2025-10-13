@@ -37,54 +37,43 @@ class RND_MRL_DQN_Agent(DQN_RNDAgent):
             self.intrinsic_coef = float(int_coef)
 
     def update_dqn(self, batch):
-        """
-        Munchausen Q-update:
-          r̃(s,a) = c_ext*R_ext + c_int*R_int + α * clip(log π(a|s), lo, 0)
-          target = r̃ + γ * Σ_a' π(a'|s') [ Q_tgt(s',a') - τ log π(a'|s') ]   (no bootstrap on terminal)
-        """
+    
         device = self.device
-        # ---- unpack batch ----
-        obs      = self.obs_to_float_tensor(batch["obs"])                  # (B, D)
-        next_obs = self.obs_to_float_tensor(batch["next_obs"])             # (B, D)
-        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(device)         # (B,)
-        ext      = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(device)    # (B,)
-        intr_n   = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(device)    # (B,)
-        term     = torch.from_numpy(batch["term"].squeeze(-1)).float().to(device)       # (B,)
+        obs      = self.obs_to_float_tensor(batch["obs"])                  
+        next_obs = self.obs_to_float_tensor(batch["next_obs"])             
+        act      = torch.from_numpy(batch["act"].squeeze(-1)).long().to(device)         
+        ext      = torch.from_numpy(batch["ext_rew"].squeeze(-1)).float().to(device)   
+        intr_n   = torch.from_numpy(batch["int_rew"].squeeze(-1)).float().to(device)    
+        term     = torch.from_numpy(batch["term"].squeeze(-1)).float().to(device)       
         # timeout  = torch.from_numpy(batch["timeout"].squeeze(-1)).float().to(device)  # not used in bootstrap
 
-        # ---- base reward (your existing scaling) ----
-        base_reward = self.extrinsic_coef * ext + self.intrinsic_coef * intr_n          # (B,)
+        base_reward = self.extrinsic_coef * ext + self.intrinsic_coef * intr_n          
 
-        # ---- Q(s,·) and Q(s,a) ----
-        q_s_online = self.q_net(obs)                                                    # (B, A)
-        q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)                        # (B,)
+        q_s_online = self.q_net(obs)                                                   
+        q_sa = q_s_online.gather(1, act.unsqueeze(1)).squeeze(1)                        
 
-        # ---- Munchausen log-policy at s ----
         with torch.no_grad():
-            # subtract max for numerical stability
-            v_s = q_s_online.max(1, keepdim=True)[0]                                    # (B,1)
-            logsum_s = torch.logsumexp((q_s_online - v_s) / self.tau, dim=1, keepdim=True)  # (B,1)
-            log_pi_s = q_s_online - v_s - self.tau * logsum_s                           # (B,A)
-            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)                 # (B,)
-            log_pi_sa = torch.clamp(log_pi_sa, min=self.lo, max=0.0)                    # clip
+            v_s = q_s_online.max(1, keepdim=True)[0]                                    
+            logsum_s = torch.logsumexp((q_s_online - v_s) / self.tau, dim=1, keepdim=True)  
+            log_pi_s = q_s_online - v_s - self.tau * logsum_s                           
+            log_pi_sa = log_pi_s.gather(1, act.unsqueeze(1)).squeeze(1)                 
+            log_pi_sa = torch.clamp(log_pi_sa, min=self.lo, max=0.0)                    
 
-        munchausen_reward = base_reward + self.alpha_m * log_pi_sa                      # (B,)
+        munchausen_reward = base_reward + self.alpha_m * log_pi_sa                      
 
-        # ---- soft backup at s' ----
         with torch.no_grad():
-            q_sp_online = self.q_net(next_obs)                                          # (B, A)
-            v_sp = q_sp_online.max(1, keepdim=True)[0]                                  # (B,1)
-            logsum_sp = torch.logsumexp((q_sp_online - v_sp) / self.tau, dim=1, keepdim=True)  # (B,1)
-            log_pi_sp = q_sp_online - v_sp - self.tau * logsum_sp                       # (B, A)
-            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                            # (B, A)
+            q_sp_online = self.q_net(next_obs)                                         
+            v_sp = q_sp_online.max(1, keepdim=True)[0]                                  
+            logsum_sp = torch.logsumexp((q_sp_online - v_sp) / self.tau, dim=1, keepdim=True)  
+            log_pi_sp = q_sp_online - v_sp - self.tau * logsum_sp                      
+            pi_sp = F.softmax(q_sp_online / self.tau, dim=1)                            
 
-            q_sp_tgt = self.target_q_net(next_obs)                                      # (B, A)
-            soft_backup = (pi_sp * (q_sp_tgt - self.tau * log_pi_sp)).sum(dim=1)        # (B,)
+            q_sp_tgt = self.target_q_net(next_obs)                                     
+            soft_backup = (pi_sp * (q_sp_tgt - self.tau * log_pi_sp)).sum(dim=1)        
 
-            bootstrap_mask = 1.0 - term                                                 # (B,)
-            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup      # (B,)
+            bootstrap_mask = 1.0 - term                                                 
+            target = munchausen_reward + bootstrap_mask * self.gamma * soft_backup      
 
-        # ---- TD loss & update ----
         loss = F.smooth_l1_loss(q_sa, target)
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -92,7 +81,6 @@ class RND_MRL_DQN_Agent(DQN_RNDAgent):
             torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), self.grad_clip)
         self.optimizer.step()
 
-        # ---- diagnostics ----
         with torch.no_grad():
             mean_gap = (q_s_online.max(1, keepdim=True)[0] - q_s_online).mean().item()
         try:
@@ -113,7 +101,6 @@ def main():
     max_episode_steps = 1600
     total_timesteps = 1_000_000
 
-    # ---------- Environments (match your 16x16 blue config) ----------
     env = customised_doorkey.make_fixed_doorkey_env(
         size=16,
         key_color="blue", key_pos=(9, 1),
@@ -140,8 +127,6 @@ def main():
         max_episode_steps=max_episode_steps,
     )
 
-    # ---------- Configs ----------
-    # Use instances (simple attribute bags)
     dqn_cfg = type("DQNConfig", (), {
         "hidden_size": 1024,
         "lr": 2.5e-4,
@@ -163,7 +148,7 @@ def main():
         "rnd_mask_prob": 0.5,   # predictor keep ratio / mask prob
     })()
 
-    # ---------- Agent (RND + Munchausen) ----------
+    
     agent = RND_MRL_DQN_Agent(
         env=env,
         eval_env=eval_env,
@@ -178,7 +163,7 @@ def main():
         grad_clip=10.0,
     )
 
-    # ---------- Train ----------
+
     start = time.time()
     agent.train(total_timesteps=total_timesteps, max_episode_steps=max_episode_steps)
     end = time.time()
