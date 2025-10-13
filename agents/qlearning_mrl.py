@@ -406,21 +406,103 @@ def plot_action_gap_heatmap(Q, env, plotname="action_gap_heatmap"):
     plt.close()
 
 
+def rollout_mrl_map_from_Q(Q, tau, alpha_m, lo, env, steps=20000, epsilon=0.2, normalize=True, brighten=True):
+    nrow, ncol = env.unwrapped.nrow, env.unwrapped.ncol
+    acc = np.zeros((nrow, ncol), dtype=np.float64)
+    cnt = np.zeros((nrow, ncol), dtype=np.int32)
+
+    def log_pi(q):
+        v = np.max(q)
+        lse = np.log(np.sum(np.exp((q - v)/tau))) + v/tau
+        return (q/tau) - lse
+
+    state, _ = env.reset()
+    for _ in range(steps):
+        lp = log_pi(Q[state])
+        probs = np.exp(lp)
+        if np.random.rand() < epsilon:
+            a = np.random.randint(Q.shape[1])
+        else:
+            a = int(np.argmax(Q[state]))
+
+        m_add = alpha_m * np.clip(lp[a], lo, 0.0)   # <= 0
+        r, c = divmod(state, ncol)
+        acc[r, c] += (-m_add if brighten else m_add)
+        cnt[r, c] += 1
+
+        state, _, term, trunc, _ = env.step(a)
+        if term or trunc:
+            state, _ = env.reset()
+
+    heat = np.divide(acc, np.maximum(cnt, 1), out=np.zeros_like(acc), where=cnt>0)
+    if normalize:
+        mn, mx = heat.min(), heat.max()
+        if mx > mn:
+            heat = (heat - mn) / (mx - mn)
+    return heat
+
+
+
+import numpy as np
+
+def expected_mrl_map_from_Q(Q, tau, alpha_m, lo, env, normalize=True, brighten=True):
+    """
+    Returns an (nrow, ncol) heatmap from a tabular Q.
+    Heat per state s is  - alpha_m * E_{pi}[ clip(log pi(a|s), lo, 0) ].
+    (Negated so higher = brighter where policy is sharp.)
+    """
+    nrow, ncol = env.unwrapped.nrow, env.unwrapped.ncol
+    heat = np.zeros((nrow, ncol), dtype=np.float32)
+
+    for s in range(Q.shape[0]):
+        q = Q[s]
+        # log-softmax with temperature tau
+        v = np.max(q)
+        logsumexp = np.log(np.sum(np.exp((q - v) / tau))) + v / tau
+        log_pi = (q / tau) - logsumexp           # shape (A,)
+        pi = np.exp(log_pi)                      # softmax probs
+
+        m_exp = alpha_m * np.sum(pi * np.clip(log_pi, lo, 0.0))  # <= 0
+        val = -m_exp if brighten else m_exp
+
+        r, c = divmod(s, ncol)
+        heat[r, c] = val
+
+    if normalize:
+        mn, mx = heat.min(), heat.max()
+        if mx > mn:
+            heat = (heat - mn) / (mx - mn)
+    return heat
+
+
+
+
 def main():
     # seed = 42
     # set_seed(seed)
 
     wandb.init(project="frozenlake-cfn", name="MRL-true-vs-pseudo-bonues")
 
+    # map = [
+    #     "SHFFFFFF",
+    #     "FFFFFHFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFHFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFHFF",
+    #     "FFFHFFFG",
+    # ]
+
     map = [
-        "SHFFFFFF",
+        "SFFFFFFH",
+        "HHHHFFFH",
         "FFFFFHFF",
-        "FFFFFFFF",
-        "FFFFFFFF",
-        "FFHFFFFF",
-        "FFFFFFFF",
-        "FFFFFHFF",
-        "FFFHFFFG",
+        "FGFFFFFH",
+        "FHFFFHFF",
+        "FHFFFFHF",
+        "FFFFHHHF",
+        "HHHHHFFG",
     ]
 
     # map = [
@@ -534,7 +616,7 @@ def main():
     avg_reward = evaluate_agent(Q_mrl+noise, env, is_save_gif=True)
     print(f"\nAverage evaluation reward over 100 episodes (MRL): {avg_reward:.2f}")
 
-    noise = np.random.normal(0, 0.05, size=Q_vanilla.shape)
+    noise = np.random.normal(0, 0.05, size=Q_mrl.shape)
     avg_reward = evaluate_agent(Q_vanilla+noise, env, is_save_gif=True, gif_path="vanilla.gif")
     print(f"\nAverage evaluation reward over 100 episodes (Vanilla): {avg_reward:.2f}")
 
@@ -547,6 +629,22 @@ def main():
         env=env,
         plotname="munchausen_vs_true_bonus"
     )
+
+    # --- Munchausen state maps from tabular Q ---
+    m_exp = expected_mrl_map_from_Q(Q_mrl, tau=0.03, alpha_m=0.9, lo=-1.0, env=env)
+    m_roll = rollout_mrl_map_from_Q(Q_mrl, tau=0.03, alpha_m=0.9, lo=-1.0, env=env, steps=30000, epsilon=0.2)
+
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(1, 2, figsize=(10,4))
+    im0 = ax[0].imshow(m_exp, origin='upper'); ax[0].set_title("Munchausen (expected)")
+    fig.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
+    im1 = ax[1].imshow(m_roll, origin='upper'); ax[1].set_title("Munchausen (rollout)")
+    fig.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    Path("frozen-lake-plots").mkdir(parents=True, exist_ok=True)
+    plt.savefig(Path("frozen-lake-plots") / "munchausen_state_maps.png")
+    plt.close()
+
 
     plot_q_table_heatmaps(Q_mrl, Q_vanilla, env, prefix="qtable_mrl_vs_vanilla")
 

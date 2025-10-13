@@ -204,7 +204,7 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
     axs[1].grid(True)
 
     axs[2].scatter(true_bonus, approx_bonus)
-    axs[2].plot([0, 0.2], [0, 0.2], linestyle="--", color="black", linewidth=1)
+    axs[2].plot([0, max_val], [0, max_val], linestyle="--", color="black", linewidth=1)
     axs[2].set_xlabel("True Bonus")
     axs[2].set_ylabel("Approx Bonus")
     axs[2].set_title("True vs. Approx Bonus")
