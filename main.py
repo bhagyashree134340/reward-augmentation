@@ -7,6 +7,13 @@ import wandb
 from omegaconf import DictConfig
 
 # from agents.dqn_cfn import DQN_CFNAgent
+from agents.dqn_cfn import DQN_CFNAgent, dqn_cfn_main
+from agents.dqn_cfn_mrl import dqn_cfn_mrl_main
+from agents.dqn_rnd import dqn_rnd_main
+from agents.dqn_rnd_mrl import dqn_rnd_mrl_main
+from agents.qleanring_cfn import q_learning_cfn_main
+from agents.qlearning_mrl import q_learning_mrl_main
+from agents.qlearning_rnd_basic import q_learning_rnd_main
 from agents.sac_agent import SACAgent
 from agents.sac_cfn_agent import SACCFNAgent
 from agents.sac_cfn_discrete import SACCFNAgentDiscrete
@@ -128,17 +135,6 @@ def create_agent(cfg: DictConfig, env):
                 noise_clip=cfg.agent.noise_clip,
             
             )
-
-    elif agent_id == "dqn_agent":
-        a = 1
-        # if use_cfn:
-        #     agent = DQN_CFNAgent(
-        #         env=env,
-        #         eval_env=eval_env,
-        #         dqn_cfg=cfg.agent,
-        #         cfn_cfg=cfg.cfn
-        #     )
-
     else:
         raise ValueError(f"Unsupported agent id: {agent_id}")
 
@@ -150,34 +146,61 @@ def main(cfg: DictConfig):
     # Set random seed
     # set_seed(cfg.seed)
 
-    output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
+    agent_id = cfg.agent.id.lower()
     rew_aug = "cfn" if cfg.agent.cfn else "rnd" if cfg.agent.rnd else "mrl" if cfg.agent.mrl else "vanilla"
 
+
     wandb.init(
-        project="sac-reward-aug",
+        project=f"{cfg.env.id}",
         name=f"{cfg.agent.id.lower()}_{cfg.env.id}_{rew_aug}",
         config=dict(cfg),
-        reinit=True
+        reinit=True,
+        mode="disabled"
     )
 
-    env = make_env(cfg.env.id,
-                   render_mode=cfg.env.render_mode,
-                   max_episode_steps=cfg.env.max_episode_steps)
 
-    agent = create_agent(cfg, env)
+    if agent_id == "q_learning_cfn_agent":
+        q_learning_cfn_main(cfg)
+        return
+    elif agent_id == "q_learning_rnd_agent":
+        q_learning_rnd_main(cfg)
+        return
+    elif agent_id == "q_learning_mrl_agent":
+        q_learning_mrl_main(cfg)
+        return
+    elif agent_id == "dqn_cfn_mini":
+        dqn_cfn_main(cfg)
+        return
+    elif agent_id == "dqn_rnd_mini":
+        dqn_rnd_main(cfg)
+        return
+    elif agent_id == "dqn_cfn_mrl_mini":
+        dqn_cfn_mrl_main(cfg)
+        return
+    elif agent_id == "dqn_rnd_mrl_mini":
+        dqn_rnd_mrl_main(cfg)
+        return
+    elif agent_id not in ["sac_agent", "td3_agent"]:
+        output_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+        plots_dir = output_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
 
-    start_time = time.time()
-    agent.train(
-        total_timesteps=cfg.agent.num_env_steps,
-        max_episode_steps=cfg.env.max_episode_steps
-    )
-    elapsed = time.time() - start_time
-    h, rem = divmod(elapsed, 3600)
-    m, s = divmod(rem, 60)
-    log.info(f"[✓] Training finished in {int(h)}h {int(m)}m {int(s)}s")
+
+        env = make_env(cfg.env.id,
+                    render_mode=cfg.env.render_mode,
+                    max_episode_steps=cfg.env.max_episode_steps)
+
+        agent = create_agent(cfg, env)
+
+        start_time = time.time()
+        agent.train(
+            total_timesteps=cfg.agent.num_env_steps,
+            max_episode_steps=cfg.env.max_episode_steps
+        )
+        elapsed = time.time() - start_time
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        log.info(f"⛄︎ Training finished in {int(h)}h {int(m)}m {int(s)}s ⛄︎")
 
 
 if __name__ == "__main__":

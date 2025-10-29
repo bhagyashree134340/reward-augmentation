@@ -89,7 +89,7 @@ class RND_MRL_DQN_Agent(DQN_RNDAgent):
             pass
 
 
-def main():
+def dqn_rnd_mrl_main(cfg):
     import time
     import numpy as np
     import wandb
@@ -172,4 +172,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    dqn_rnd_mrl_main()

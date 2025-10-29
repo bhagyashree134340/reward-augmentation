@@ -387,7 +387,7 @@ def plot_action_gap_heatmap(Q, env, plotname="action_gap_heatmap"):
     for s in range(num_states):
         q_vals = Q[s]
         sorted_q = np.sort(q_vals)
-        action_gaps[s] = sorted_q[-1] - sorted_q[-2]  # max - second-best
+        action_gaps[s] = sorted_q[-1] - sorted_q[-2]  
 
     heatmap = action_gaps.reshape(nrow, ncol)
 
@@ -446,23 +446,17 @@ def rollout_mrl_map_from_Q(Q, tau, alpha_m, lo, env, steps=20000, epsilon=0.2, n
 import numpy as np
 
 def expected_mrl_map_from_Q(Q, tau, alpha_m, lo, env, normalize=True, brighten=True):
-    """
-    Returns an (nrow, ncol) heatmap from a tabular Q.
-    Heat per state s is  - alpha_m * E_{pi}[ clip(log pi(a|s), lo, 0) ].
-    (Negated so higher = brighter where policy is sharp.)
-    """
     nrow, ncol = env.unwrapped.nrow, env.unwrapped.ncol
     heat = np.zeros((nrow, ncol), dtype=np.float32)
 
     for s in range(Q.shape[0]):
         q = Q[s]
-        # log-softmax with temperature tau
         v = np.max(q)
         logsumexp = np.log(np.sum(np.exp((q - v) / tau))) + v / tau
-        log_pi = (q / tau) - logsumexp           # shape (A,)
-        pi = np.exp(log_pi)                      # softmax probs
+        log_pi = (q / tau) - logsumexp          
+        pi = np.exp(log_pi)                      
 
-        m_exp = alpha_m * np.sum(pi * np.clip(log_pi, lo, 0.0))  # <= 0
+        m_exp = alpha_m * np.sum(pi * np.clip(log_pi, lo, 0.0))  
         val = -m_exp if brighten else m_exp
 
         r, c = divmod(s, ncol)
@@ -477,124 +471,38 @@ def expected_mrl_map_from_Q(Q, tau, alpha_m, lo, env, normalize=True, brighten=T
 
 
 
-def main():
-    # seed = 42
-    # set_seed(seed)
+def q_learning_mrl_main(cfg):
 
-    wandb.init(project="frozenlake-cfn", name="MRL-true-vs-pseudo-bonues")
+    map = cfg.agent.env.map
 
-    # map = [
-    #     "SHFFFFFF",
-    #     "FFFFFHFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFHFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFHFF",
-    #     "FFFHFFFG",
-    # ]
+    env = gym.make(cfg.agent.env.id, is_slippery=cfg.agent.env.is_slippery, render_mode=cfg.agent.env.render_mode, desc=map, max_episode_steps=cfg.agent.env.max_episode_steps)
 
-    map = [
-        "SFFFFFFH",
-        "HHHHFFFH",
-        "FFFFFHFF",
-        "FGFFFFFH",
-        "FHFFFHFF",
-        "FHFFFFHF",
-        "FFFFHHHF",
-        "HHHHHFFG",
-    ]
-
-    # map = [
-    #     "SFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFG",
-    # ]
-
-    # map = [
-    #     "SFFFF",
-    #     "FFFFF",
-    #     "FFFFF",
-    #     "FFFFF",
-    #     "FFFFG"
-    # ]
-
-    # map = [
-    #     "SHFFFFFF",
-    #     "FFFFFHFF",
-    #     "FFFFFFFF",
-    #     "FFFFFFFF",
-    #     "FFHFFFFF",
-    #     "FFFFFFFF",
-    #     "FFFFFHFF",
-    #     "FFFHFFFG",
-    # ]
-
-    # map = [
-    #     "SFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFG"
-    # ]
-
-    # map = [
-    #     "SFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFG"
-    # ]
-
-    env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array", desc=map, max_episode_steps=200)
-
+    ql_mrl = cfg.agent.mrl_cfg
     Q_mrl, true_counts = train_q_learning(
         env=env,
-        batch_size=128,
-        max_timesteps=50000,
-        alpha=0.5,
-        gamma=0.99,
-        epsilon=1.0,
-        epsilon_decay=0.999,
-        epsilon_min=0.05,
-        tau=0.03,
-        alpha_m=0.9,
-        lo=-1.0,
-        noise_std=0.1
+        batch_size=ql_mrl.batch_size,
+        max_timesteps=ql_mrl.max_timesteps,
+        alpha=ql_mrl.alpha,
+        gamma=ql_mrl.gamma,
+        epsilon=ql_mrl.epsilon,
+        epsilon_decay=ql_mrl.epsilon_decay,
+        epsilon_min=ql_mrl.epsilon_min,
+        tau=ql_mrl.tau,
+        alpha_m=ql_mrl.alpha_m,
+        lo=ql_mrl.lo,
+        noise_std=ql_mrl.noise_std
     )
 
+    ql_vanilla = cfg.agent.vanilla_q
     Q_vanilla, true_counts_vanilla = train_q_learning_without_mrl(
         env=env,
-        max_timesteps=50000,
-        alpha=0.9,
-        gamma=0.99,
-        epsilon=1.0,
-        epsilon_decay=0.999,
-        epsilon_min=0.05,
-        noise_std=0.1
+        max_timesteps=ql_vanilla.max_timesteps,
+        alpha= ql_vanilla.alpha,
+        gamma= ql_vanilla.gamma,
+        epsilon= ql_vanilla.epsilon,
+        epsilon_decay= ql_vanilla.epsilon_decay,
+        epsilon_min= ql_vanilla.epsilon_min,
+        noise_std= ql_vanilla.noise_std
     )
 
     gap_mrl = compute_avg_action_gap(Q_mrl)
@@ -630,7 +538,6 @@ def main():
         plotname="munchausen_vs_true_bonus"
     )
 
-    # --- Munchausen state maps from tabular Q ---
     m_exp = expected_mrl_map_from_Q(Q_mrl, tau=0.03, alpha_m=0.9, lo=-1.0, env=env)
     m_roll = rollout_mrl_map_from_Q(Q_mrl, tau=0.03, alpha_m=0.9, lo=-1.0, env=env, steps=30000, epsilon=0.2)
 
@@ -665,4 +572,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    q_learning_mrl_main()

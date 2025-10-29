@@ -16,7 +16,7 @@ from networks.ddqn import DDQN
 from CFN.CFN import CoinFlipNetwork
 from CFN.cfn_buffer import CFNReplayBufferWrapper
 from CFN.priority_util import get_coin_flips
-import customised_doorkey
+import agents.customised_doorkey as customised_doorkey
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 log = logging.getLogger(__name__)
@@ -644,84 +644,58 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval-flat", num_episodes=10,
     print("EVAL last 5 steps:", pos_history[-5:])
 
 
-def main():
-    run = wandb.init(project="dqn", name="cfn", reinit=True)
+def dqn_cfn_main(cfg):
+    # run = wandb.init(project="dqn", name="cfn", reinit=True)
 
-    code_art = wandb.Artifact(f"code-{wandb.run.id}", type="code")
-    this_file = pathlib.Path(__file__).resolve()
-    code_art.add_file(str(this_file), name=this_file.name)
+    # code_art = wandb.Artifact(f"code-{wandb.run.id}", type="code")
+    # this_file = pathlib.Path(__file__).resolve()
+    # code_art.add_file(str(this_file), name=this_file.name)
 
-    total_timesteps   = 1_000_000
-    max_episode_steps = 1600
+    total_timesteps   = cfg.agent.training.total_timesteps
+    max_episode_steps = cfg.agent.training.max_episode_steps
 
+
+    env_cfg = cfg.agent.env
     env = customised_doorkey.make_fixed_doorkey_env(
-        size=16,
-        key_color="blue", key_pos=(9, 1),     
-        door_color="blue", door_pos=(12, 7),   
-        goal_pos=(9, 14),
-        agent_start_pos=(1, 1), agent_start_dir=0,
-        wall_cells=[(9, 7), (10, 7), (11, 7), (13, 7), (14, 7)],
+        size=env_cfg.size,
+        key_color=env_cfg.key_color, key_pos=env_cfg.key_pos,     
+        door_color=env_cfg.door_color, door_pos=env_cfg.door_pos,   
+        goal_pos=env_cfg.goal_pos,
+        agent_start_pos=env_cfg.agent_start_pos, agent_start_dir=env_cfg.agent_start_dir,
+        wall_cells=env_cfg.wall_cells,
         # extra_keys=[((9, 1), "blue")],
         # extra_doors=[((12, 7), "blue", True)],
-        ensure_door_in_wall=True,
-        empty_cells=[(8, 5)],
-        render_mode="rgb_array",
+        ensure_door_in_wall=env_cfg.ensure_door_in_wall,
+        empty_cells=env_cfg.empty_cells,
+        render_mode=env_cfg.render_mode,
         max_episode_steps=max_episode_steps,
     )
 
+    eval_env_cfg = cfg.agent.eval_env
     eval_env = customised_doorkey.make_fixed_doorkey_env(
-        size=16,
-        key_color="blue", key_pos=(9, 1),     
-        door_color="blue", door_pos=(12, 7),   
-        goal_pos=(9, 14),
-        agent_start_pos=(1, 1), agent_start_dir=0,
-        wall_cells=[(9, 7), (10, 7), (11, 7), (13, 7), (14, 7)],
+        size=eval_env_cfg.size,
+        key_color=eval_env_cfg.key_color, key_pos=eval_env_cfg.key_pos,     
+        door_color=eval_env_cfg.door_color, door_pos=eval_env_cfg.door_pos,   
+        goal_pos=eval_env_cfg.goal_pos,
+        agent_start_pos=eval_env_cfg.agent_start_pos, agent_start_dir=eval_env_cfg.agent_start_dir,
+        wall_cells=eval_env_cfg.wall_cells,
         # extra_keys=[((9, 1), "blue")],
         # extra_doors=[((12, 7), "blue", True)],
-        ensure_door_in_wall=True,
-        empty_cells=[(8, 5)],
-        render_mode="rgb_array",
+        ensure_door_in_wall=eval_env_cfg.ensure_door_in_wall,
+        empty_cells=eval_env_cfg.empty_cells,
+        render_mode=eval_env_cfg.render_mode,
         max_episode_steps=max_episode_steps,
     )
-
-    # env = customised_doorkey.make_fixed_doorkey_env(
-    #     size=10,
-    #     key_color="red", key_pos=(1, 8),     
-    #     door_color="red", door_pos=(5, 5),   
-    #     goal_pos=(8, 1),
-    #     agent_start_pos=(1, 1), agent_start_dir=0,
-    #     wall_cells=[(7, 2), (8, 2)],
-    #     # extra_keys=[((9, 1), "blue")],
-    #     # extra_doors=[((12, 7), "blue", True)],
-    #     ensure_door_in_wall=True,
-    #     render_mode="rgb_array",
-    #     max_episode_steps=max_episode_steps,
-    # )
-    
-
-    # eval_env = customised_doorkey.make_fixed_doorkey_env(
-    #     size=10,
-    #     key_color="red", key_pos=(1, 8),     
-    #     door_color="red", door_pos=(5, 5),   
-    #     goal_pos=(8, 1),
-    #     agent_start_pos=(1, 1), agent_start_dir=0,
-    #     wall_cells=[(7, 2), (8, 2)],
-    #     # extra_keys=[((9, 1), "blue")],
-    #     # extra_doors=[((12, 7), "blue", True)],
-    #     ensure_door_in_wall=True,
-    #     render_mode="rgb_array",
-    #     max_episode_steps=max_episode_steps,
-    # )
 
 
     dqn_cfg = type("DQNConfig", (), {
-        "hidden_size": 512,
-        "lr": 3e-4,
-        "gamma": 0.99,
-        "batch_size": 256,
-        "replay_buffer_size": 500_000,
-        "target_update_freq": 1000,
-        "learning_starts": 10_000,
+        "hidden_size": cfg.agent.dqn.hidden_size,
+        "lr": cfg.agent.dqn.lr,
+        "gamma": cfg.agent.dqn.gamma,
+        "batch_size": cfg.agent.dqn.batch_size,
+        "replay_buffer_size": cfg.agent.dqn.replay_buffer_size,
+        "target_update_freq": cfg.agent.dqn.target_update_freq,
+        "learning_starts": cfg.agent.dqn.learning_starts,
     })()
 
     cfn_cfg = type("CFNConfig", (), {
@@ -742,4 +716,4 @@ def main():
     print(f"Training finished in {(end - start) / 60:.2f} minutes.")
 
 if __name__ == "__main__":
-    main()
+    dqn_cfn_main()

@@ -432,7 +432,7 @@ def train_q_learning_vanilla(env, max_timesteps, alpha, gamma, epsilon, epsilon_
     return Q, true_counts
 
 
-def main():
+def q_learning_rnd_main(cfg):
     set_seed(42)
 
     wandb.init(project=CONFIG["wandb_project"], name=CONFIG["wandb_run_name"])
@@ -499,4 +499,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    q_learning_rnd_main()

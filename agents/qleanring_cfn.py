@@ -65,8 +65,8 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
-        if done and next_state == 63:
-            reward = 10.0
+        # if done and next_state == 63:
+        #     reward = 10.0
 
         intrinsic_reward = compute_intrinsic_reward(
             coin_flip_dim,
@@ -85,7 +85,14 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
         )
 
         best_next_action = np.argmax(Q[next_state])
-        Q[state, action] += alpha * (total_reward + gamma * Q[next_state, best_next_action] - Q[state, action])
+
+        if done:
+            target = reward + intrinsic_reward.item()   # no bootstrap at terminal
+        else:
+            target = reward + intrinsic_reward.item() + gamma * Q[next_state, best_next_action]
+
+        Q[state, action] += alpha * (target - Q[state, action])
+
 
         obs_batch_bc, coin_flip_batch_bc, indices = cfn_buffer.sample_with_indices(batch_size=1024)
         update_cfn_network(cfn, cfn_optimizer, obs_batch_bc, coin_flip_batch_bc)
@@ -174,19 +181,6 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
         for s in states
     ])
 
-    for s in range(state_size):
-        true = true_counts[s]
-        true_b = true_bonus[s]
-        pseudo = pseudo_count[s]
-        pseudo_b = approx_bonus[s]
-        if true > 0:
-            percent_error = abs(pseudo - true) / true * 100
-            percent_error_b = abs(pseudo_b - true_b) / true_b * 100
-        else:
-            percent_error = 0
-            percent_error_b = 0
-        # print(f"State {s}: True Count = {true}, Pseudo Count = {pseudo:.2f}, Deviation = {percent_error:.2f}%")
-
     fig, axs = plt.subplots(1, 3, figsize=(18, 5))
     max_val = max(max(true_counts), max(pseudo_count))
 
@@ -245,12 +239,6 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
         im = ax.imshow(data, cmap=cmap)
         ax.set_title(title)
         fig.colorbar(im, ax=ax)
-
-        # for i in range(grid_size):
-        #     for j in range(grid_size):
-        #         val = data[i, j]
-        #         ax.text(j, i, f"{val:.1f}", ha='center', va='center',
-        #                 color='white' if val > (vmin + vmax) / 2 else 'black')
 
         ax.set_xticks(range(grid_size))
         ax.set_yticks(range(grid_size))
@@ -344,21 +332,19 @@ def train_q_learning_vanilla(env, max_timesteps, alpha, gamma, epsilon, epsilon_
     return Q, true_counts
 
 
-def main():
-    # seed = 42
-    # set_seed(seed)
+def q_learning_cfn_main(cfg):
 
-    wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts")
-    map = [
-        "SFFFFFFH",
-        "HHHHFFFH",
-        "FFFFFHFF",
-        "FGFFFFFH",
-        "FHFFFHFF",
-        "FHFFFFHF",
-        "FFFFHHHF",
-        "HHHHHFFG",
-    ]
+    map = cfg.agent.env.desc
+    # map = [
+    #     "SFFFFFFH",
+    #     "HHHHFFFH",
+    #     "FFFFFHFF",
+    #     "FGFFFFFH",
+    #     "FHFFFHFF",
+    #     "FHFFFFHF",
+    #     "FFFFHHHF",
+    #     "HHHHHFFG",
+    # ]
     #
     # map = [
     #     "SFFFFFFFFFFF",
@@ -394,27 +380,27 @@ def main():
     #     "FFFFFFFFFFFFFFFG"
     # ]
 
-    env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array", desc=map, max_episode_steps=500)
+    env = gym.make(cfg.agent.env.id, is_slippery=cfg.agent.env.is_slippery, render_mode=cfg.agent.env.render_mode, desc=map, max_episode_steps=cfg.agent.env.max_episode_steps)
     state_size = env.observation_space.n
-    coin_flip_dim = 16
+    coin_flip_dim = cfg.agent.q_learning_cfn.intrinsic.coin_flip_dim
 
     cfn = CoinFlipNetwork(state_dim=state_size, coin_dim=coin_flip_dim)
     cfn_buffer = CFNReplayBufferWrapper(
-        size=100000,
+        size=cfg.agent.cfn_config.buffer.size,
         obs_shape=(state_size,),
         coin_flip_dim=coin_flip_dim,
-        alpha=0.5
+        alpha=cfg.agent.cfn_config.buffer.alpha,
     )
-    cfn_optimizer = optim.Adam(cfn.parameters(), lr=1e-3)
+    cfn_optimizer = optim.Adam(cfn.parameters(), lr=cfg.agent.cfn_config.lr)
 
     Q, true_counts = train_q_learning(
         env=env,
-        max_timesteps=100000,
-        alpha=0.8,
-        gamma=0.95,
-        epsilon=1.0,
-        epsilon_decay=0.995,
-        epsilon_min=0.1,
+        max_timesteps=cfg.agent.q_learning_cfn.max_timesteps,
+        alpha=cfg.agent.q_learning_cfn.alpha,
+        gamma=cfg.agent.q_learning_cfn.gamma,
+        epsilon=cfg.agent.q_learning_cfn.epsilon.start,
+        epsilon_decay=cfg.agent.q_learning_cfn.epsilon.decay,
+        epsilon_min=cfg.agent.q_learning_cfn.epsilon.min,
         cfn=cfn,
         cfn_buffer=cfn_buffer,
         cfn_optimizer=cfn_optimizer,
@@ -423,14 +409,14 @@ def main():
 
     Q_vanilla, true_counts_vanilla = train_q_learning_vanilla(
         env=env,
-        max_timesteps=100000,
-        alpha=0.1,
-        gamma=0.999,
-        epsilon=1.0,
-        epsilon_decay=0.9995,
-        epsilon_min=0.05,
-        buffer_size=50000,
-        batch_size=64
+        max_timesteps=cfg.agent.q_learning_vanilla.max_timesteps,
+        alpha=cfg.agent.q_learning_vanilla.alpha,
+        gamma=cfg.agent.q_learning_vanilla.gamma,
+        epsilon=cfg.agent.q_learning_vanilla.epsilon.start,
+        epsilon_decay=cfg.agent.q_learning_vanilla.epsilon.decay,
+        epsilon_min=cfg.agent.q_learning_vanilla.epsilon.min,
+        buffer_size=cfg.agent.q_learning_vanilla.replay.buffer_size,
+        batch_size=cfg.agent.q_learning_vanilla.replay.batch_size
     )
 
     avg_reward = evaluate_agent(Q, env, save_gif_at_end=True)
@@ -443,4 +429,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    q_learning_cfn_main()

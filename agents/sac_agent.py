@@ -69,13 +69,13 @@ class SACAgent:
             }
         )
 
-        # Initialize two critic and one actor network
+        # two critic and one actor network
         self.q1 = Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(self.device)
         self.q2 = Critic(env.observation_space.shape[0], env.action_space.shape[0]).to(self.device)
         self.actor = Actor(env.observation_space.shape[0], env.action_space.shape[0], action_low=env.action_space.low, action_high=env.action_space.high).to(self.device)
         self.log_ent_coef = torch.zeros(1, requires_grad=True, device=self.device)
 
-        # Initialze two target critic and one target actor networks and load the corresponding state_dicts
+        # two target critic and one target actor networks and load the corresponding state_dicts
         self.q1_target = copy.deepcopy(self.q1).to(self.device)
         self.q2_target = copy.deepcopy(self.q2).to(self.device)
         self.actor_target = copy.deepcopy(self.actor).to(self.device)
@@ -84,7 +84,7 @@ class SACAgent:
         self.q2_target.load_state_dict(self.q2.state_dict())
         self.actor_target.load_state_dict(self.actor.state_dict())
 
-        # Create ADAM optimizer for the Critic and Actor networks
+        # ADAM optimizer for the Critic and Actor networks
         self.q1_optimizer = optim.Adam(self.q1.parameters(), lr=lr)
         self.q2_optimizer = optim.Adam(self.q2.parameters(), lr=lr)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)

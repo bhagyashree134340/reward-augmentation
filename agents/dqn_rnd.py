@@ -19,7 +19,7 @@ from collections import deque
 from hydra.core.hydra_config import HydraConfig
 import random
 import gymnasium as gym
-import customised_doorkey
+import agents.customised_doorkey as customised_doorkey
 
 from networks.ddqn import DDQN
 from utils.stats import EpisodeStats
@@ -542,7 +542,7 @@ def plot_rnd_intrinsic_three_panels_agg(agent, agg="max", normalized=True, step=
 
 
 
-def main():
+def dqn_rnd_main(cfg):
     wandb.init(project="dqn", name="rnd")
     ENV_NAME = "Fixed-DoorKey-v0"
 
@@ -644,4 +644,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    dqn_rnd_main()

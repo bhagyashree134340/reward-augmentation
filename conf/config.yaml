@@ -1,5 +1,5 @@
 defaults:
-  - agent: sac_agent #sac_agent #td3_agent
+  - agent: q_learning_cfn_agent #sac_agent #td3_agent
   - env: half_cheetah #reacher #half_cheetah
   - cfn: cfn
   - rnd: rnd

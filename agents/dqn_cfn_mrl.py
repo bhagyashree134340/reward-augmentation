@@ -91,9 +91,7 @@ class CFN_MRL_DQNAgent(DQN_CFNAgent):
         }, step=step)
 
 
-
-
-def main():
+def dqn_cfn_mrl_main(cfg):
     wandb.init(project="dqn", name="cfn-mrl-fixed")
     total_timesteps = 1_000_000
     max_episode_steps = 400
@@ -168,4 +166,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    dqn_cfn_mrl_main()
