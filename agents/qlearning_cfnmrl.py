@@ -40,10 +40,21 @@ def update_cfn_network(cfn, optimizer, obs_batch, coin_flip_batch):
 
 def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
                      cfn, cfn_buffer, cfn_optimizer, coin_flip_dim, buffer_size):
+    
+    tau=0.03
+    alpha_m=0.9
+    lo=-1.0
+    
     state_size = env.observation_space.n
     action_size = env.action_space.n
     Q = np.zeros((state_size, action_size))
     true_counts = np.zeros(state_size, dtype=np.int32)
+
+    def compute_log_pi(q_values, tau):
+        v = np.max(q_values)
+        logsumexp = np.log(np.sum(np.exp((q_values - v) / tau))) + v / tau
+        log_pi = (q_values / tau) - logsumexp
+        return log_pi
 
     replay_buffer = deque(maxlen=buffer_size)
 
@@ -88,13 +99,20 @@ def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, e
             priority=1.0
         )
 
-        if len(replay_buffer) >= 10000:
+        if len(replay_buffer) >= 64:
             batch_size = 64
             sampled_transitions = random.sample(replay_buffer, batch_size)
 
-            for s, a, r, i_r, s_next, d in sampled_transitions:
-                best_next_action = np.argmax(Q[s_next])
-                target = r + i_r + (0.0 if d else gamma * Q[s_next, best_next_action])
+            for s, a, r, i_r, ns, d in sampled_transitions:
+                log_pi = compute_log_pi(Q[s], tau)
+                log_pi_a = np.clip(log_pi[a], lo, 0.0)
+                munchausen_reward = r + alpha_m * log_pi_a
+
+                next_log_pi = compute_log_pi(Q[ns], tau)
+                pi_next = np.exp(next_log_pi)
+                soft_v_next = np.sum(pi_next * (Q[ns] - tau * next_log_pi))
+
+                target = munchausen_reward + i_r + (0.0 if d else gamma * soft_v_next)
                 Q[s, a] += alpha * (target - Q[s, a])
 
         obs_batch_bc, coin_flip_batch_bc, indices = cfn_buffer.sample_with_indices(batch_size=1024)
