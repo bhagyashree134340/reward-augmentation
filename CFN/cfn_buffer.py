@@ -52,14 +52,14 @@ class CFNReplayBufferWrapper:
 
     def sample(self, batch_size):
         sample = self.buffer.sample(batch_size)
-        sample["obs"] = (sample["obs"].astype(np.float32) / 255.0)
+        sample["obs"] = (sample["obs"].astype(np.float32))
         return sample
 
     def sample_with_indices(self, batch_size):
         sample = self.buffer.sample(batch_size)
         indices = sample["indexes"]
 
-        obs_batch = torch.tensor(sample["obs"].astype(np.float32) / 255.0,
+        obs_batch = torch.tensor(sample["obs"].astype(np.float32),
                                  dtype=torch.float32, device=self.device)
         coin_flip_batch = torch.tensor(sample["coin_flip"],
                                        dtype=torch.float32, device=self.device)
@@ -81,7 +81,7 @@ class CFNReplayBufferWrapper:
         sample = self.buffer.sample(batch_size)
         indices = sample["indexes"]
 
-        obs_batch = torch.tensor(sample["obs"].astype(np.float32) / 255.0,
+        obs_batch = torch.tensor(sample["obs"].astype(np.float32),
                                  dtype=torch.float32, device=self.device)
         coin_flip_batch = torch.tensor(sample["coin_flip"],
                                        dtype=torch.float32, device=self.device)

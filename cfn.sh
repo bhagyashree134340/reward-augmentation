@@ -14,9 +14,9 @@ echo "Loading conda env..."
 
 # Activate your conda environment
 source ~/miniconda3/bin/activate
-conda activate py310env
+conda activate rl310
 
-export WANDB_API_KEY=c2dddd2dd918a67e72290a2c5ab4247fe12be92b
+export WANDB_API_KEY=28c48f9795c35a55ee1bf7a82a05994bf808294a
 
 start=`date +%s`
 
