@@ -361,15 +361,13 @@ class DQN_CFNAgent:
             if current_timestep % 10_000 == 0 and current_timestep > 0:
                 evaluate_dqn(self, self.eval_env, current_timestep, save_dir="checkpoints_cfn", epsilon_eval=0.0)
             if current_timestep % 5000 == 0 or current_timestep == 10:
-                plot_rnd_intrinsic_three_panels_agg(
-                    self,
-                    door_pos=(12, 7),
-                    key_pos=(9, 1),
-                    agg="mean",
-                    step=current_timestep
-                )
-
-
+                if current_timestep % 5000 == 0:
+                    plot_cfn_intrinsic_three_panels_agg(
+                        self,
+                        agg="mean",
+                        step=current_timestep
+                    )
+                    
 
     def update_q(self, batch, step):
         obs = torch.tensor(batch["obs"], dtype=torch.float32, device=self.device)
@@ -580,6 +578,78 @@ def plot_rnd_intrinsic_three_panels_agg(
     plt.close(fig)
 
 
+def probe_bonus_grid(self, env, step=None):
+    """
+    Compute CFN intrinsic bonus for every interior cell.
+    Aggregates over 4 directions (mean).
+    Logs a single heatmap to wandb.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import torch
+    from matplotlib import cm
+
+    if env.unwrapped.agent_pos is None:
+        env.reset()
+
+    base = env.unwrapped
+    H_int = self._cfn_H_in
+    W_int = self._cfn_W_in
+
+    bonus_grid = np.zeros((H_int, W_int), dtype=np.float32)
+
+    # Save original agent state
+    old_pos = tuple(map(int, base.agent_pos))
+    old_dir = int(getattr(base, "agent_dir", 0))
+
+    with torch.no_grad():
+        for yi in range(H_int):
+            for xi in range(W_int):
+                base.agent_pos = (xi + 1, yi + 1)
+
+                vals = []
+                for d in range(4):
+                    base.agent_dir = d
+                    phi = self.cfn_compact_obs(base)
+                    obs_t = torch.from_numpy(phi).unsqueeze(0).to(self.device)
+
+                    pred = self.cfn(obs_t, update_prior_stats=False)
+                    sq = (pred ** 2).sum(dim=1)
+                    bonus = torch.sqrt(
+                        torch.clamp(sq / float(self.coin_flip_dim), min=1e-12)
+                    )
+
+                    vals.append(float(bonus.item()))
+
+                bonus_grid[yi, xi] = float(np.mean(vals))
+
+    # Restore env state
+    base.agent_pos = old_pos
+    base.agent_dir = old_dir
+
+    # ---- Plot ----
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
+    im = ax.imshow(
+        bonus_grid,
+        origin="upper",
+        interpolation="nearest",
+        cmap=cm.viridis,
+    )
+    ax.set_title("CFN intrinsic bonus (interior)")
+    ax.set_xticks(range(W_int))
+    ax.set_yticks(range(H_int))
+    plt.colorbar(im, ax=ax, fraction=0.046)
+    plt.tight_layout()
+
+    # ---- Log to wandb ----
+    if step is not None:
+        wandb.log({"cfn/bonus_heatmap": wandb.Image(fig)}, step=step)
+    else:
+        wandb.log({"cfn/bonus_heatmap": wandb.Image(fig)})
+
+    plt.close(fig)
+
+    return bonus_grid
 
 
 def evaluate_dqn(agent, eval_env, step, save_dir="eval-flat", num_episodes=10,
@@ -665,8 +735,149 @@ def evaluate_dqn(agent, eval_env, step, save_dir="eval-flat", num_episodes=10,
     print("EVAL last 5 steps:", pos_history[-5:])
 
 
+
+def plot_cfn_intrinsic_three_panels_agg(agent, agg="mean", step=None):
+    """
+    Plot CFN intrinsic bonus heatmaps for three semantic configs:
+      1) Door closed, no key
+      2) Door closed, has key
+      3) Door open, has key
+
+    Aggregates CFN bonus over agent direction (mean or max).
+    """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import torch
+    from minigrid.core.world_object import Door, Key
+
+    base = agent.eval_env.unwrapped
+    H_in = base.grid.height - 2
+    W_in = base.grid.width - 2
+
+    # ---------- helpers ----------
+
+    def find_primary_door(b):
+        for y in range(1, b.grid.height - 1):
+            for x in range(1, b.grid.width - 1):
+                obj = b.grid.get(x, y)
+                if isinstance(obj, Door):
+                    return x, y, obj
+        return None
+
+    def remove_keys_of_color(b, color):
+        for y in range(1, b.grid.height - 1):
+            for x in range(1, b.grid.width - 1):
+                obj = b.grid.get(x, y)
+                if isinstance(obj, Key) and obj.color == color:
+                    b.grid.set(x, y, None)
+
+    # ---------- configs ----------
+
+    configs = [
+        ("Closed, no key", dict(door_open=False, has_key=False)),
+        ("Closed, has key", dict(door_open=False, has_key=True)),
+        ("Open, has key",   dict(door_open=True,  has_key=True)),
+    ]
+
+    maps = []
+
+    # Freeze CFN running stats
+    was_training = agent.cfn.training
+    agent.cfn.eval()
+
+    with torch.no_grad():
+        for _, cfg in configs:
+            agent.eval_env.reset()
+            b = agent.eval_env.unwrapped
+
+            pd = find_primary_door(b)
+            door_pos, door_color = None, None
+            if pd is not None:
+                x_d, y_d, door = pd
+                door_pos = (x_d, y_d)
+                door_color = door.color
+
+            # ---- key handling ----
+            b.carrying = None
+            if cfg["has_key"]:
+                key_color = door_color if door_color is not None else "yellow"
+                b.carrying = Key(key_color)
+                remove_keys_of_color(b, key_color)
+
+            # ---- door state ----
+            if door_pos is not None:
+                x_d, y_d = door_pos
+                door = b.grid.get(x_d, y_d)
+                door.is_open = cfg["door_open"]
+                door.is_locked = not door.is_open
+                b.grid.set(x_d, y_d, door)
+
+            # ---- sweep grid ----
+            M_dir = np.zeros((4, H_in, W_in), dtype=np.float32)
+
+            for d in range(4):
+                b.agent_dir = d
+                for yy in range(H_in):
+                    for xx in range(W_in):
+                        b.agent_pos = (xx + 1, yy + 1)
+
+                        phi = agent.cfn_compact_obs(b)
+                        obs_t = torch.from_numpy(phi).unsqueeze(0).to(agent.device)
+
+                        pred = agent.cfn(obs_t, update_prior_stats=False)
+                        sq = (pred ** 2).sum(dim=1)
+                        bonus = torch.sqrt(
+                            torch.clamp(sq / float(agent.coin_flip_dim), min=1e-12)
+                        )
+
+                        M_dir[d, yy, xx] = float(bonus.item())
+
+            M = np.max(M_dir, axis=0) if agg == "max" else np.mean(M_dir, axis=0)
+            maps.append(M)
+
+    # Restore CFN mode
+    agent.cfn.train(was_training)
+
+    # ---------- plot ----------
+    fig, axs = plt.subplots(
+        1, 4, figsize=(28, 9), dpi=200,
+        gridspec_kw={"width_ratios": [1, 1, 1, 0.04]}
+    )
+    cax = axs[3]
+
+    vmin = min(np.min(m) for m in maps)
+    vmax = max(np.max(m) for m in maps)
+
+    for ax, (title, _), M in zip(axs[:3], configs, maps):
+        im = ax.imshow(
+            M,
+            cmap="viridis",
+            origin="upper",
+            vmin=vmin,
+            vmax=vmax,
+            interpolation="nearest",
+        )
+        ax.set_title(f"{title} ({agg} over dir)")
+        ax.set_xticks(range(W_in))
+        ax.set_yticks(range(H_in))
+
+    cb = fig.colorbar(im, cax=cax)
+    cb.set_label("CFN intrinsic bonus (raw)")
+
+    if step is not None:
+        import wandb
+        wandb.log(
+            {f"heatmap/cfn_intrinsic_three_panels_{agg}": wandb.Image(fig)},
+            step=step
+        )
+
+    plt.close(fig)
+
+
+
 def main():
-    wandb.init(project="dqn", name="cfn", mode="offline")
+    wandb.init(project="dqn", name="cfn")
 
     total_timesteps   = 1_000_000
     max_episode_steps = 1600

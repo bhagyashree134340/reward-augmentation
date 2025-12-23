@@ -120,7 +120,7 @@ class CoinFlipNetworkCNN(nn.Module):
         return (f.pow(2).sum(dim=1)).clamp_min(1e-12)
     
 
-class CoinFlipNetwork(nn.Module):
+class CoinFlipNetworkx(nn.Module):
     def __init__(self, state_dim, coin_dim, hidden_dim=128, device=None):
         super().__init__()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -259,3 +259,79 @@ class CoinFlipNetwork(nn.Module):
 #                 self.update_prior_stats(prior_out)
 #             z = (prior_out - self.prior_mean) / self._prior_std()
 #         return yhat + z
+
+
+class CoinFlipNetwork(nn.Module):
+    def __init__(self, state_dim, coin_dim, hidden_dim=128, device=None):
+        super().__init__()
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Trainable network
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, coin_dim),
+        )
+
+        # Frozen random prior
+        self.prior = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, coin_dim),
+        )
+        for p in self.prior.parameters():
+            p.requires_grad = False
+
+        # Running statistics (Sam Lobel style)
+        self.register_buffer("prior_mean", torch.zeros(coin_dim))
+        self.register_buffer("prior_var", torch.ones(coin_dim))
+        self.register_buffer("prior_count", torch.tensor(1.0))
+
+        self.coin_flip_dim = coin_dim
+        self.to(self.device)
+
+    def forward(self, state, update_prior_stats=False):
+        state = state.to(self.device)
+
+        train_out = self.net(state)
+
+        with torch.no_grad():
+            prior_out = self.prior(state)
+
+            if update_prior_stats:
+                self._update_prior_stats(prior_out)
+
+            std = torch.sqrt(self.prior_var + 1e-8)
+            prior_normed = (prior_out - self.prior_mean) / std
+
+        return train_out + prior_normed
+
+    def _update_prior_stats(self, prior_out):
+        # Match Sam: update using batch mean
+        if prior_out.dim() > 1:
+            prior_out = prior_out.mean(dim=0)
+
+        count = self.prior_count
+        new_count = count + 1.0
+
+        delta = prior_out - self.prior_mean
+        new_mean = self.prior_mean + delta / new_count
+
+        delta2 = prior_out - new_mean
+        new_var = (
+            self.prior_var * count +
+            delta * delta2
+        ) / new_count
+
+        self.prior_mean.copy_(new_mean)
+        self.prior_var.copy_(new_var)
+        self.prior_count.copy_(new_count)
+
+    @torch.no_grad()
+    def compute_squared_output_norm(self, obs):
+        out = self.forward(obs, update_prior_stats=False)
+        return (out ** 2).sum(dim=-1)
