@@ -15,6 +15,8 @@ from CFN.cfn_buffer import CFNReplayBufferWrapper
 from CFN.priority_util import compute_intrinsic_reward, get_coin_flips
 import random
 
+from utils.env_wrapper import ActionConfusionWrapper
+
 
 def set_seed(seed=42):
     np.random.seed(seed)
@@ -30,121 +32,161 @@ def one_hot(state, size):
     return vec.unsqueeze(0)
 
 
-def update_cfn_network(cfn, optimizer, obs_batch, coin_flip_batch):
+def update_cfn(cfn, optimizer, obs_batch, coin_flip_batch):
     predicted = cfn(obs_batch)
     loss = torch.nn.functional.mse_loss(predicted, coin_flip_batch)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+    return loss.item()
 
 
-def train_q_learning(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
-                     cfn, cfn_buffer, cfn_optimizer, coin_flip_dim, buffer_size):
-    state_size = env.observation_space.n
-    action_size = env.action_space.n
-    Q = np.zeros((state_size, action_size))
-    true_counts = np.zeros(state_size, dtype=np.int32)
+def train_q_learning(
+    env,
+    max_timesteps,
+    alpha,
+    gamma,
+    epsilon,
+    epsilon_decay,
+    epsilon_min,
+    cfn,
+    cfn_buffer,
+    cfn_optimizer,
+    coin_flip_dim,
+    buffer_size,
+):
 
-    replay_buffer = deque(maxlen=buffer_size)
 
-    total_timesteps = 0
-    episode_reward = 0
-    episode_length = 0
+    nS = env.observation_space.n
+    nA = env.action_space.n
+    Q = np.zeros((nS, nA))
+    buffer = deque(maxlen=50000)
+
+    step = 0
+    episode = 0
+    goals = 0
+    first_goal_step = None
+    max_depth = []
 
     state, _ = env.reset()
-    obs_tensor = one_hot(state, state_size)
-    true_counts[state] += 1
+    obs = one_hot(state, nS)
 
-    while total_timesteps < max_timesteps:
+    while step < max_timesteps:
+        # ε-greedy ONLY (no CFN bias here)
         if np.random.rand() < epsilon:
             action = env.action_space.sample()
         else:
-            if np.all(Q[state] == 0):
-                action = env.action_space.sample()
-            else:
-                action = np.argmax(Q[state])
+            action = np.argmax(Q[state])
 
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
-        if done and next_state == 63:
+        if done and next_state == nS - 1:
             reward = 10.0
+            goals += 1
+            if first_goal_step is None:
+                first_goal_step = step
+            print("🎯 Goal reached")
 
-        intrinsic_reward = compute_intrinsic_reward(
+        # intrinsic reward (decays to zero)
+        beta = max(0.0, 1.0 - step / (0.5 * max_timesteps))
+        intrinsic = beta * 0.05 * compute_intrinsic_reward(
             coin_flip_dim,
-            cfn.compute_squared_output_norm(obs_tensor)
-        )
+            cfn.compute_squared_output_norm(obs)
+        ).item()
 
-        total_reward = reward + intrinsic_reward.item()
+        buffer.append((state, action, reward, intrinsic, next_state, done))
 
-        _ = cfn(obs_tensor, update_prior_stats=True)
-
-        replay_buffer.append((state, action, reward, intrinsic_reward, next_state, done))
-
-        coin_flip = get_coin_flips(coin_flip_dim)
+        # CFN update
+        coins = get_coin_flips(coin_flip_dim)
         cfn_buffer.add(
-            obs=obs_tensor.cpu().numpy().squeeze(),
-            coin_flip=coin_flip.detach().cpu().numpy(),
+            obs=obs.numpy().squeeze(),
+            coin_flip=coins.detach().numpy(),
             priority=1.0
         )
 
-        if len(replay_buffer) >= 10000:
-            batch_size = 64
-            sampled_transitions = random.sample(replay_buffer, batch_size)
+        obs_b, coin_b, idx = cfn_buffer.sample_with_indices(512)
+        cfn_loss = update_cfn(cfn, cfn_optimizer, obs_b, coin_b)
+        cfn_buffer.update_priorities(idx, obs_b, cfn, coin_flip_dim)
 
-            for s, a, r, i_r, s_next, d in sampled_transitions:
-                best_next_action = np.argmax(Q[s_next])
-                target = r + i_r + (0.0 if d else gamma * Q[s_next, best_next_action])
+        # Q update
+        if len(buffer) >= 256:
+            batch = random.sample(buffer, 256)
+            for s, a, r, ir, sn, d in batch:
+                if d:
+                    target = r
+                else:
+                    target = r + ir + gamma * np.max(Q[sn])
                 Q[s, a] += alpha * (target - Q[s, a])
 
-        obs_batch_bc, coin_flip_batch_bc, indices = cfn_buffer.sample_with_indices(batch_size=1024)
-        update_cfn_network(cfn, cfn_optimizer, obs_batch_bc, coin_flip_batch_bc)
-        cfn_buffer.update_priorities(indices, obs_batch_bc, cfn, coin_flip_dim)
-
-        if total_timesteps % 1000 == 0 and total_timesteps > 0:
-            avg_reward = evaluate_agent(Q, env, episodes=20)
-            wandb.log({"eval/avg_reward": avg_reward}, step=total_timesteps)
-
-        total_timesteps += 1
-        episode_reward += reward
-        episode_length += 1
         state = next_state
-        obs_tensor = one_hot(state, state_size)
-        true_counts[state] += 1
-        _ = cfn(obs_tensor, update_prior_stats=True)
+        obs = one_hot(state, nS)
+        step += 1
 
         if done:
-            print(
-                f"Timestep {total_timesteps}, "
-                f"Epsilon {epsilon:.3f}, Return {episode_reward:.2f}, "
-                f"Length {episode_length}"
-            )
-
-            if epsilon > epsilon_min:
-                epsilon *= epsilon_decay
+            episode += 1
+            max_depth.append(state // int(np.sqrt(nS)))
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
             state, _ = env.reset()
-            obs_tensor = one_hot(state, state_size)
-            true_counts[state] += 1
-            episode_reward = 0
-            episode_length = 0
+            obs = one_hot(state, nS)
 
-    return Q, true_counts
+        if step % 5000 == 0:
+            wandb.log({
+                "steps": step,
+                "epsilon": epsilon,
+                "beta": beta,
+                "cfn_loss": cfn_loss,
+                "goal_reaches": goals,
+                "mean_max_depth": np.mean(max_depth[-50:]) if max_depth else 0
+            })
+
+    return Q, goals, first_goal_step, max_depth
 
 
-def evaluate_agent(Q, env, episodes=100, save_gif_at_end=False, gif_path="frozenlake_qlearning_20x20.gif"):
-    total_rewards = 0
+def evaluate_agent(
+    Q,
+    env,
+    episodes=100,
+    save_gif_at_end=False,
+    gif_path="frozenlake_qlearning.gif",
+):
+    total_return = 0.0
+    success_episodes = 0
+
     for _ in range(episodes):
         state, _ = env.reset()
         done = False
+        episode_return = 0.0
+        reached_goal = False
+
         while not done:
             action = np.argmax(Q[state])
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
-            total_rewards += reward
+
+            if done and state == env.observation_space.n - 1:
+                reward = 1
+                reached_goal = True
+            else:
+                reward = 0
+
+            episode_return += reward
+
+        total_return += episode_return
+        if reached_goal:
+            success_episodes += 1
+
+    avg_return = total_return / episodes
+    success_rate = success_episodes / episodes
+
+    print(f"Goal reached in {success_episodes}/{episodes} episodes")
+    print(f"Average return: {avg_return:.2f}")
 
     if save_gif_at_end:
         save_gif(Q, env, gif_path)
-    return total_rewards / episodes
+
+    return avg_return, success_rate
+
 
 
 def save_gif(Q, env, filename=None, max_steps=100):
@@ -183,19 +225,6 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
         np.sqrt(cfn.compute_squared_output_norm(one_hot(s, state_size)).item() / coin_flip_dim)
         for s in states
     ])
-
-    for s in range(state_size):
-        true = true_counts[s]
-        true_b = true_bonus[s]
-        pseudo = pseudo_count[s]
-        pseudo_b = approx_bonus[s]
-        if true > 0:
-            percent_error = abs(pseudo - true) / true * 100
-            percent_error_b = abs(pseudo_b - true_b) / true_b * 100
-        else:
-            percent_error = 0
-            percent_error_b = 0
-        # print(f"State {s}: True Count = {true}, Pseudo Count = {pseudo:.2f}, Deviation = {percent_error:.2f}%")
 
     fig, axs = plt.subplots(1, 3, figsize=(18, 5))
     max_val = max(max(true_counts), max(pseudo_count))
@@ -246,8 +275,6 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
         true_bonus_grid, approx_bonus_grid
     ]
     cmaps = ["viridis", "viridis", "magma", "magma"]
-    vmins = [count_vmin, count_vmin, bonus_vmin, bonus_vmin]
-    vmaxs = [count_vmax, count_vmax, bonus_vmax, bonus_vmax]
 
     axs = axs.flatten()
 
@@ -255,12 +282,6 @@ def plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim, save_path="c
         im = ax.imshow(data, cmap=cmap)
         ax.set_title(title)
         fig.colorbar(im, ax=ax)
-
-        # for i in range(grid_size):
-        #     for j in range(grid_size):
-        #         val = data[i, j]
-        #         ax.text(j, i, f"{val:.1f}", ha='center', va='center',
-        #                 color='white' if val > (vmin + vmax) / 2 else 'black')
 
         ax.set_xticks(range(grid_size))
         ax.set_yticks(range(grid_size))
@@ -295,81 +316,95 @@ def log_counts_to_wandb(cfn, true_counts, coin_flip_dim):
         print(f"{s}\t{true_counts[s]}\t\t{pseudo_bonus[s]:.4f}")
 
 
-def train_q_learning_vanilla(env, max_timesteps, alpha, gamma, epsilon, epsilon_decay, epsilon_min,
-                             buffer_size=50000, batch_size=64):
-    state_size = env.observation_space.n
-    action_size = env.action_space.n
-    Q = np.zeros((state_size, action_size))
-    true_counts = np.zeros(state_size, dtype=np.int32)
+def train_q_learning_vanilla(
+    env,
+    max_timesteps,
+    alpha,
+    gamma,
+    epsilon,
+    epsilon_decay,
+    epsilon_min,
+    buffer_size=50000,
+    batch_size=64,
+):
+    nS = env.observation_space.n
+    nA = env.action_space.n
 
+    Q = np.zeros((nS, nA))
     replay_buffer = deque(maxlen=buffer_size)
 
-    total_timesteps = 0
+    total_steps = 0
     episode_reward = 0
     episode_length = 0
-    state, _ = env.reset()
-    true_counts[state] += 1
 
-    while total_timesteps < max_timesteps:
+    goals = 0
+    first_goal_step = None
+    max_depth_per_episode = []
+
+    state, _ = env.reset()
+
+    while total_steps < max_timesteps:
         if np.random.rand() < epsilon or np.all(Q[state] == 0):
-            action = np.random.choice(action_size)
+            action = np.random.choice(nA)
         else:
             action = np.argmax(Q[state])
 
         next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
 
-        if done and next_state == 63:
+        if done and next_state == nS - 1:
             reward = 10.0
+            goals += 1
+            if first_goal_step is None:
+                first_goal_step = total_steps
+            print("🎯 [Vanilla] Goal reached")
 
         replay_buffer.append((state, action, reward, next_state, done))
 
         if len(replay_buffer) >= batch_size:
             batch = random.sample(replay_buffer, batch_size)
             for s, a, r, s_next, d in batch:
-                target = r + (0.0 if d else gamma * np.max(Q[s_next]))
+                target = r if d else r + gamma * np.max(Q[s_next])
                 Q[s, a] += alpha * (target - Q[s, a])
 
-        if total_timesteps % 1000 == 0 and total_timesteps > 0:
-            avg_reward = evaluate_agent(Q, env, episodes=20)
-            wandb.log({"eval/avg_reward_van": avg_reward, "eval/step_van": total_timesteps})
-
-        total_timesteps += 1
+        total_steps += 1
         episode_reward += reward
         episode_length += 1
         state = next_state
-        true_counts[state] += 1
 
         if done:
+            max_depth_per_episode.append(state // int(np.sqrt(nS)))
+
             print(
-                f"[Vanilla Q] Timestep {total_timesteps}, Return {episode_reward:.2f}, Length {episode_length}"
+                f"[Vanilla] Step {total_steps}, "
+                f"Return {episode_reward:.2f}, "
+                f"Length {episode_length}, "
+                f"Goals {goals}"
             )
-            if epsilon > epsilon_min:
-                epsilon *= epsilon_decay
+
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
             state, _ = env.reset()
-            true_counts[state] += 1
             episode_reward = 0
             episode_length = 0
 
-    return Q, true_counts
+        if total_steps % 5000 == 0:
+            wandb.log({
+                "vanilla/steps": total_steps,
+                "vanilla/epsilon": epsilon,
+                "vanilla/goals": goals,
+                "vanilla/first_goal_step": first_goal_step if first_goal_step else -1,
+                "vanilla/mean_max_depth": np.mean(max_depth_per_episode[-50:]) if max_depth_per_episode else 0,
+            })
+
+    return Q, goals, first_goal_step, max_depth_per_episode
 
 
 def main():
     # seed = 42
     # set_seed(seed)
 
-    wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts")
+    wandb.init(project="frozenlake-cfn", name="true-vs-pseudo-counts-aggressive")
 
-    # map = [
-    #             "SFFFFFFH",
-    #             "HHHHFFFH",
-    #             "FFFFFHFF",
-    #             "FHFFFFFH",
-    #             "FHFFFHFF",
-    #             "FHFFFFHF",
-    #             "FFFFHHHF",
-    #             "HHHHHFFG",
-    #         ]
     map = [
         "SFFFFFFH",
         "HHHHFFFH",
@@ -380,42 +415,9 @@ def main():
         "FFFFHHHF",
         "HHHHHFFG",
     ]
-    #
-    # map = [
-    #     "SFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFF",
-    #     "FFFFFFFFFFFG"
-    # ]
-    #
-    # map = [
-    #     "SFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFF",
-    #     "FFFFFFFFFFFFFFFG"
-    # ]
 
-    env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array", desc=map, max_episode_steps=500)
+    env = gym.make("FrozenLake-v1", is_slippery=True, render_mode="rgb_array", desc=map, max_episode_steps=500)
+
     state_size = env.observation_space.n
     coin_flip_dim = 16
 
@@ -428,14 +430,15 @@ def main():
     )
     cfn_optimizer = optim.Adam(cfn.parameters(), lr=1e-3)
 
-    Q, true_counts = train_q_learning(
+    # More aggressive hyperparameters
+    Q, goals, first_goal_step, max_depth = train_q_learning(
         env=env,
-        max_timesteps=100000,
-        alpha=0.8,
-        gamma=0.95,
+        max_timesteps=300000,      # Even more timesteps
+        alpha=0.15,                # Higher learning rate
+        gamma=0.997,               # Higher discount for long horizon
         epsilon=1.0,
-        epsilon_decay=0.9995,
-        epsilon_min=0.1,
+        epsilon_decay=0.99975,     # Even slower decay
+        epsilon_min=0.1,           # Higher minimum exploration
         cfn=cfn,
         cfn_buffer=cfn_buffer,
         cfn_optimizer=cfn_optimizer,
@@ -443,9 +446,18 @@ def main():
         buffer_size=50000
     )
 
-    Q_vanilla, true_counts_vanilla = train_q_learning_vanilla(
+    wandb.log({
+        "cfn/train_goals": goals,
+        "cfn/first_goal_step": first_goal_step if first_goal_step is not None else -1,
+        "cfn/mean_max_depth": np.mean(max_depth),
+        "cfn/max_depth": np.max(max_depth),
+    })
+
+
+
+    Q_vanilla, goals_vanilla, first_goal_vanilla, depth_vanilla = train_q_learning_vanilla(
         env=env,
-        max_timesteps=100000,
+        max_timesteps=300000,
         alpha=0.1,
         gamma=0.999,
         epsilon=1.0,
@@ -455,16 +467,24 @@ def main():
         batch_size=64
     )
 
-    avg_reward = evaluate_agent(Q, env, save_gif_at_end=True, gif_path="cfn")
-    print(f"\nAverage evaluation reward over 100 episodes: {avg_reward:.2f}")
+    wandb.log({
+        "vanilla/train_goals": goals_vanilla,
+        "vanilla/first_goal_step": first_goal_vanilla if first_goal_vanilla is not None else -1,
+        "vanilla/mean_max_depth": np.mean(depth_vanilla),
+        "vanilla/max_depth": np.max(depth_vanilla),
+    })
 
-    avg_reward = evaluate_agent(Q_vanilla, env, save_gif_at_end=True, gif_path="vanilla")
-    print(f"\nAverage evaluation reward over 100 episodes: {avg_reward:.2f}")
 
-    plot_combined_bonus_comparison(cfn, true_counts, coin_flip_dim)
+    avg_ret_cfn, success_cfn = evaluate_agent(Q, env, episodes=100, save_gif_at_end=True, gif_path="cfn")
+    avg_ret_van, success_van = evaluate_agent(Q_vanilla, env, episodes=100, save_gif_at_end=True, gif_path="vanilla")
 
-    print(true_counts.reshape(int(np.sqrt(len(true_counts))), int(np.sqrt(len(true_counts)))))
-    print(true_counts_vanilla.reshape(int(np.sqrt(len(true_counts_vanilla))), int(np.sqrt(len(true_counts_vanilla)))))
+    wandb.log({
+        "cfn/eval_avg_return": avg_ret_cfn,
+        "cfn/eval_success_rate": success_cfn,
+        "vanilla/eval_avg_return": avg_ret_van,
+        "vanilla/eval_success_rate": success_van,
+    })
+
 
 
 if __name__ == "__main__":

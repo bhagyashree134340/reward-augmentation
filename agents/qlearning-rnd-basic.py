@@ -13,6 +13,7 @@ import wandb
 import random
 
 from RND.rnd import RNDModel, RewardForwardFilter
+from utils.env_wrapper import ActionConfusionWrapper
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -43,7 +44,7 @@ CONFIG = {
     },
 
     "q_learning": {
-        "max_timesteps": 200_000,
+        "max_timesteps": 100_000,
         "alpha": 0.1,
         "gamma": 0.99,
         "epsilon": 1.0,
@@ -52,7 +53,7 @@ CONFIG = {
     },
 
     "vanilla_q": {
-        "max_timesteps": 200_000,
+        "max_timesteps": 100_000,
         "alpha": 0.1,
         "gamma": 0.999,
         "epsilon": 1.0,
@@ -242,6 +243,9 @@ def evaluate_agent(Q, env, episodes=100, save_gif_at_end=False, gif_path="rnd/po
             state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             episode_reward += reward
+
+            if done:
+                print(f"[Eval] Episode {ep + 1}/{episodes}, Return: {episode_reward}")
 
         total_rewards += episode_reward
 
@@ -444,6 +448,9 @@ def main():
         desc=CONFIG["env"]["map"],
         max_episode_steps=CONFIG["env"]["max_episode_steps"]
     )
+    # p_flip = 0.20  # 20% of the time, do a different action uniformly at random
+    # env_stochastic = ActionConfusionWrapper(env, uniform_flip_p=p_flip, seed=42)
+    # env = env_stochastic
 
     state_size = env.observation_space.n
 
@@ -475,9 +482,7 @@ def main():
         step=CONFIG["q_learning"]["max_timesteps"], save_dir="rnd"
     )
 
-    final_avg_reward = evaluate_agent(Q, env, episodes=100, save_gif_at_end=True, gif_path="rnd/policy_final.gif")
-    print(f"Final average reward: {final_avg_reward}")
-
+    
     print("vanilla:")
 
     Q_vanilla, true_counts_vanilla = train_q_learning_vanilla(
@@ -491,6 +496,12 @@ def main():
         buffer_size=CONFIG["vanilla_q"]["buffer_size"],
         batch_size=CONFIG["vanilla_q"]["batch_size"]
     )
+
+    final_avg_reward = evaluate_agent(Q, env, episodes=100, save_gif_at_end=True, gif_path="rnd/policy_final.gif")
+    print(f"Final average reward: {final_avg_reward}")
+
+    final_avg_reward_v = evaluate_agent(Q_vanilla, env, episodes=100, save_gif_at_end=True, gif_path="rnd/policy_final_vanilla.gif")
+    print(f"Final average reward vanila: {final_avg_reward_v}")
 
     plot_true_bonus_heatmap(true_counts_vanilla, CONFIG["vanilla_q"]["max_timesteps"])
 

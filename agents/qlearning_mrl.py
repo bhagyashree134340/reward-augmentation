@@ -12,6 +12,8 @@ from cpprb import ReplayBuffer
 from matplotlib import pyplot as plt
 import wandb
 
+from utils.env_wrapper import ActionConfusionWrapper
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -413,15 +415,26 @@ def main():
     wandb.init(project="frozenlake-cfn", name="MRL-true-vs-pseudo-bonues")
 
     map = [
-        "SHFFFFFF",
+        "SFFFFFFH",
+        "HHHHFFFH",
         "FFFFFHFF",
-        "FFFFFFFF",
-        "FFFFFFFF",
-        "FFHFFFFF",
-        "FFFFFFFF",
-        "FFFFFHFF",
-        "FFFHFFFG",
+        "FGFFFFFH",
+        "FHFFFHFF",
+        "FHFFFFHF",
+        "FFFFHHHF",
+        "HHHHHFFG",
     ]
+
+    # map = [
+    #     "SHFFFFFF",
+    #     "FFFFFHFF",
+    #     "FFFFFFFF",
+    #     "FFFFFFFF",
+    #     "FFHFFFFF",
+    #     "FFFFFFFF",
+    #     "FFFFFHFF",
+    #     "FFFHFFFG",
+    # ]
 
     # map = [
     #     "SFFFFFFF",
@@ -488,6 +501,9 @@ def main():
     # ]
 
     env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array", desc=map, max_episode_steps=200)
+    p_flip = 0.20  # 20% of the time, do a different action uniformly at random
+    env_stochastic = ActionConfusionWrapper(env, uniform_flip_p=p_flip, seed=42)
+    env = env_stochastic
 
     Q_mrl, true_counts = train_q_learning(
         env=env,
